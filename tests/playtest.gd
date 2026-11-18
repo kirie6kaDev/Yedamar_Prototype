@@ -133,18 +133,31 @@ func dismiss_dialogue() -> void:
 		game._next_dialogue()
 
 ## Run an object action via the real context path and wait for the queue to drain.
+var fast_travel := true
+
 func do_action(role: String, action: String, id: String, max_frames: int = 3000) -> Dictionary:
 	select(role)
 	var t0 := toasts.size()
+	var far := 0.0
+	if fast_travel and game.world.objects.has(id):
+		var goal: Vector3 = game.world.objects[id].get("approach", game.world.objects[id].position)
+		far = dist(game._hero(role).position, goal)
+		if far > 120.0:
+			# the world is km-scale; on-foot travel is measured separately (walk_sample)
+			var dir: Vector3 = (game._hero(role).position - goal); dir.y = 0
+			teleport(role, goal + dir.normalized() * 20.0)
+			await frames(2)
 	var start: Vector3 = game._hero(role).position
 	var f0 := Engine.get_frames_drawn()
 	game._on_action(action, id)
 	var ref = last_order(role, action, id)
 	var used := await until(func(): return gone(role, ref), max_frames)
-	if used < 0: L("    TIMEOUT diag " + JSON.stringify(diag(role)))
+	if used < 0:
+		L("    TIMEOUT diag " + JSON.stringify(diag(role)))
+		game._clear_orders()
 	dismiss_dialogue()
 	var target: Vector3 = game.world.objects[id].get("approach", game.world.objects[id].position) if game.world.objects.has(id) else start
-	return {"action": action, "id": id, "frames": used, "timeout": used < 0, "end_dist": snappedf(dist(game._hero(role).position, target), 0.01), "walked": snappedf(dist(start, game._hero(role).position), 0.1), "toasts": toasts.slice(t0)}
+	return {"action": action, "id": id, "frames": used, "timeout": used < 0, "end_dist": snappedf(dist(game._hero(role).position, target), 0.01), "walked": snappedf(dist(start, game._hero(role).position), 0.1), "fast_travel_m": snappedf(far, 1) if far > 120.0 else 0.0, "toasts": toasts.slice(t0)}
 
 func walk_to(role: String, point: Vector3, max_frames: int = 3000) -> Dictionary:
 	select(role)
