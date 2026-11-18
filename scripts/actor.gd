@@ -61,6 +61,9 @@ var _appearance_key:=""
 var _visual_profile:Dictionary={}
 var _visual_identity:String=""
 var _appearance_base_scale:=Vector3.ONE
+## Distance between the end of the last planned route and the requested target
+## (0 when the route reaches it). Lets callers detect "arrived as close as possible".
+var path_gap:=0.0
 
 
 func _build_character_model()->void:
@@ -182,10 +185,13 @@ func navigate_to(target: Vector3) -> bool:
 		end_work()
 	var route: PackedVector3Array = _nav.path(global_position, target)
 	if route.is_empty():
+		# Synchronous failure is reported through the return value only. Emitting
+		# movement_failed here as well made queue owners pop the order twice
+		# (signal handler + caller), silently dropping the NEXT queued action.
 		stop_moving()
-		movement_failed.emit()
 		return false
 	_target = target
+	path_gap = Vector2(route[-1].x - target.x, route[-1].z - target.z).length()
 	if _mining:
 		_action_left = 0.0
 		_show_mining_tool(false)
@@ -526,13 +532,18 @@ func _physics_process(delta: float) -> void:
 		else:
 			var direction := offset.normalized()
 			var next := global_position + direction * travel
-			if not _nav.is_walkable(Vector2(next.x, next.z)):
+			var here := Vector2(global_position.x, global_position.z)
+			# Only the prop body blocks a step; an actor already standing inside a
+			# blocked spot (bed, spawn, newly built prop) may always step out.
+			if not _nav.is_passable(Vector2(next.x, next.z)) and _nav.is_passable(here):
 				_recoveries += 1
 				if _recoveries > 2:
 					stop_moving()
 					movement_failed.emit()
 					return
-				_path = _nav.path(global_position, _target)
+				# Recover on the raw grid route (full clearance, no shortcuts);
+				# re-running the same smoothed query would return the same path.
+				_path = _nav.path(global_position, _target, true)
 				_cursor = 0
 				if _path.is_empty():
 					stop_moving()

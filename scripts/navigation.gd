@@ -50,6 +50,26 @@ func configure(sampler: Callable, area: Rect2, obstacles: Array) -> void:
 
 
 func is_walkable(p: Vector2, extra_clearance: float = 0.0) -> bool:
+	if not _terrain_ok(p):
+		return false
+	var key:=Vector2i(floori(p.x / BUCKET),floori(p.y / BUCKET))
+	for circle: Vector3 in _obstacles.get(key, []):
+		if p.distance_squared_to(Vector2(circle.x, circle.z)) < pow(circle.y + extra_clearance, 2.0):
+			return false
+	for circle: Vector3 in _dynamic.get(key, []):
+		if p.distance_squared_to(Vector2(circle.x, circle.z)) < pow(circle.y + extra_clearance, 2.0):
+			return false
+	return true
+
+
+## Runtime step check used by moving actors: only the prop body itself blocks,
+## the CLEARANCE band is a planning margin. Prevents a planned path that grazes
+## the margin from being rejected mid-walk (the main cause of "cannot reach").
+func is_passable(p: Vector2) -> bool:
+	return is_walkable(p, -CLEARANCE)
+
+
+func _terrain_ok(p: Vector2) -> bool:
 	if not _bounds.has_point(p):
 		return false
 	var elevation := float(_height.call(p.x, p.y))
@@ -57,13 +77,7 @@ func is_walkable(p: Vector2, extra_clearance: float = 0.0) -> bool:
 		return false
 	var dx := (float(_height.call(p.x + 3.0, p.y)) - float(_height.call(p.x - 3.0, p.y))) / 6.0
 	var dz := (float(_height.call(p.x, p.y + 3.0)) - float(_height.call(p.x, p.y - 3.0))) / 6.0
-	if Vector2(dx, dz).length() > MAX_SLOPE:
-		return false
-	var key:=Vector2i(floori(p.x / BUCKET),floori(p.y / BUCKET))
-	for circle: Vector3 in _obstacles.get(key, []) + _dynamic.get(key, []):
-		if p.distance_squared_to(Vector2(circle.x, circle.z)) < pow(circle.y + extra_clearance, 2.0):
-			return false
-	return true
+	return Vector2(dx, dz).length() <= MAX_SLOPE
 
 func set_dynamic_obstacles(obstacles:Array)->void:
 	var changed:Array=_dynamic_points.duplicate(true)
@@ -92,10 +106,30 @@ func set_dynamic_obstacles(obstacles:Array)->void:
 
 
 func _clear(a: Vector2, b: Vector2) -> bool:
+	# Terrain (water/slope) is sampled; props are tested exactly against the
+	# segment. Point sampling every 2.5 m used to cut through small props, and
+	# the actor then refused the step at runtime and dropped the order.
 	var count := maxi(1, ceili(a.distance_to(b) / 2.5))
 	for i in range(count + 1):
-		if not is_walkable(a.lerp(b, float(i) / count)):
+		if not _terrain_ok(a.lerp(b, float(i) / count)):
 			return false
+	return _segment_free(a, b)
+
+
+func _segment_free(a: Vector2, b: Vector2) -> bool:
+	var segment := b - a
+	var length_squared := maxf(0.0001, segment.length_squared())
+	var first := Vector2i(floori(minf(a.x, b.x) / BUCKET), floori(minf(a.y, b.y) / BUCKET))
+	var last := Vector2i(floori(maxf(a.x, b.x) / BUCKET), floori(maxf(a.y, b.y) / BUCKET))
+	for y in range(first.y, last.y + 1):
+		for x in range(first.x, last.x + 1):
+			var key := Vector2i(x, y)
+			for source: Dictionary in [_obstacles, _dynamic]:
+				for circle: Vector3 in source.get(key, []):
+					var center := Vector2(circle.x, circle.z)
+					var nearest := a + segment * clampf((center - a).dot(segment) / length_squared, 0.0, 1.0)
+					if nearest.distance_squared_to(center) < circle.y * circle.y:
+						return false
 	return true
 
 
@@ -121,9 +155,11 @@ func _nearby(p: Vector2) -> Vector2i:
 	return Vector2i(-1, -1)
 
 
-func path(start: Vector3, finish: Vector3) -> PackedVector3Array:
+## strict=true skips the straight-line/shortcut smoothing and returns the raw
+## grid route (every waypoint has full clearance); used as a recovery path.
+func path(start: Vector3, finish: Vector3, strict: bool = false) -> PackedVector3Array:
 	var t0 := Time.get_ticks_usec()
-	var result := _path(start, finish)
+	var result := _path(start, finish, strict)
 	var spent := Time.get_ticks_usec() - t0
 	stats_calls += 1
 	stats_usec += spent
@@ -133,11 +169,11 @@ func path(start: Vector3, finish: Vector3) -> PackedVector3Array:
 	return result
 
 
-func _path(start: Vector3, finish: Vector3) -> PackedVector3Array:
+func _path(start: Vector3, finish: Vector3, strict: bool = false) -> PackedVector3Array:
 	var result := PackedVector3Array()
 	var a := Vector2(start.x, start.z)
 	var b := Vector2(finish.x, finish.z)
-	if _clear(a, b):
+	if not strict and _clear(a, b):
 		result.append(Vector3(b.x, float(_height.call(b.x, b.y)), b.y))
 		return result
 	var first := _nearby(a)
@@ -161,6 +197,10 @@ func _path(start: Vector3, finish: Vector3) -> PackedVector3Array:
 			approach = candidate
 		if approach.distance_squared_to(last_cell) > 0.01:
 			route.append(approach)
+	if strict:
+		for p in route:
+			result.append(Vector3(p.x, float(_height.call(p.x, p.y)), p.y))
+		return result
 	var cursor := 0
 	var previous := a
 	while cursor < route.size():
