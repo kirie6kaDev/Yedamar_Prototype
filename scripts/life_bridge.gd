@@ -13,6 +13,7 @@ var sim
 var citizens:Dictionary={}
 var proxies:Dictionary={}
 var motion_targets:Dictionary={}
+var motion_attempts:Dictionary={}
 var social_locks:Dictionary={}
 var house_stores:Dictionary={}
 var speed:=1.0
@@ -214,6 +215,7 @@ func _update_population()->void:
 		actor.queue_free()
 		citizens.erase(id)
 		motion_targets.erase(id)
+		motion_attempts.erase(id)
 	for id in wanted:
 		if not sim.residents.has(id) or game.state.characters.has(id): continue
 		var record:Dictionary=sim.residents[id]
@@ -241,8 +243,15 @@ func _update_population()->void:
 		else:
 			if not actor._work_clip.is_empty(): actor.end_work()
 			if game._flat_distance(actor.position,point)>1.5 and (motion_targets.get(id,"")!=target_key or not actor.is_moving()):
+				var retry:bool=motion_targets.get(id,"")==target_key
 				motion_targets[id]=target_key
-				if not actor.navigate_to(point): sim.report_unreachable(str(id),str(target.get("id","")))
+				motion_attempts[id]=int(motion_attempts.get(id,0))+1 if retry else 1
+				# Give up on a target the route cannot get close to instead of
+				# re-planning it every population tick forever (stuck, A* spam).
+				if int(motion_attempts[id])>3 or not actor.navigate_to(point) or actor.path_gap>1.5:
+					motion_attempts.erase(id)
+					motion_targets.erase(id)
+					sim.report_unreachable(str(id),str(target.get("id","")))
 	for role in game._roles():
 		if sim.residents.has(role): _present(game._hero(role),sim.residents[role])
 
@@ -390,7 +399,12 @@ func run_order(role:String,delta:float)->void:
 			return
 	if str(order.phase)=="walking":
 		if not portable and game._flat_distance(actor.position,target)>1.7:
-			if not actor.is_moving() and not actor.navigate_to(target): _finish_order(role,"Путь к месту закрыт.")
+			if not actor.is_moving():
+				# Arrived as close as the route allows but still too far: re-planning
+				# every frame used to loop forever (per-frame A* = lag, stuck hero).
+				order["repaths"]=int(order.get("repaths",0))+1
+				if int(order.repaths)>3 or not actor.navigate_to(target) or actor.path_gap>1.7:
+					_finish_order(role,"Путь к месту закрыт.")
 			return
 		actor.stop_moving()
 		if not venue_id.is_empty() and not sim.reserve(role,venue_id,action,float(spec.get("duration",10))+30):
@@ -427,6 +441,11 @@ func run_order(role:String,delta:float)->void:
 			game._update_ui()
 
 func _finish_order(role:String,message:String,notify:bool=true)->void:
+	# Autonomous (automatic) orders fail silently; their reasons ("Собеседник
+	# занят.", "Путь к месту закрыт.") used to spam the player with toasts about
+	# things they never asked for.
+	if not game.orders[role].is_empty() and bool(game.orders[role][0].get("automatic",false)):
+		notify=false
 	cancel(role)
 	game._hero(role).stop_moving()
 	game._hero(role).end_work()
@@ -476,8 +495,17 @@ func context_actions(id:String,role:String)->Array[Dictionary]:
 func _action_name(action:String)->String:
 	return str({"eat":"Поесть","drink":"Попить","wash":"Искупаться / умыться","toilet":"Посетить отхожее место","sleep":"Поспать","relax":"Отдохнуть и развлечься","read":"Почитать","train":"Тренироваться","cook":"Приготовить еду","socialize":"Поговорить","joke":"Пошутить","compliment":"Похвалить","apologize":"Извиниться","insult":"Поссориться","flirt":"Флиртовать","propose":"Предложить брак","plan_child":"Планировать ребёнка","invite_household":"Предложить жить вместе","educate":"Учиться","work":"Работать","apply_job":"Устроиться на работу","buy":"Купить","sell":"Продать","move_home":"Переехать","buy_home":"Купить дом"}.get(action,action))
 
-func update_ui()->void:
+var _ui_next_ms:=0
+
+## force=false is the periodic 0.2 s HUD refresh. Building the full life-book
+## model (sim.ui_state + civic/domestic rows) costs ~45 ms, so while the life
+## window is closed it is rebuilt at most every 1.5 s (was a 5 Hz frame hitch).
+func update_ui(force:bool=true)->void:
 	if not _simulation_ready or not game.hud.has_method("update_life"): return
+	var open:bool=game.hud._life_ui!=null and game.hud._life_ui.panel.visible
+	var now:=Time.get_ticks_msec()
+	if not force and not open and now<_ui_next_ms: return
+	_ui_next_ms=now+1500
 	var data:Dictionary=sim.ui_state(str(game.active.role))
 	data.summary.speed=0 if game.get_tree().paused else Engine.time_scale
 	data.summary.speed_actions=[]

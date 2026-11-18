@@ -428,11 +428,22 @@ func _on_action(action:String,id:String)->void:
 	_enqueue(active.role,{"action":action,"id":id,"phase":"waiting","remaining":0.0})
 
 func _enqueue(role:String,order:Dictionary)->void:
+	# A player command pre-empts autonomous/workday orders. Before, autonomy
+	# filled the empty queue and the player's action waited behind e.g. a walk
+	# to the tavern, so the hero "ignored" commands. Autonomy/workday planning
+	# refill the queue again once it is empty.
+	if not bool(order.get("automatic",false)):
+		var queue:Array=orders[role]
+		if not queue.is_empty() and bool(queue[0].get("automatic",false)):
+			_end_job(role)
+			_hero(role).stop_moving()
+		for i in range(queue.size()-1,-1,-1):
+			if bool(queue[i].get("automatic",false)): queue.remove_at(i)
 	if orders[role].size()>=12:
 		hud.toast("В очереди уже 12 действий.")
 		return
 	orders[role].append(order)
-	_update_ui()
+	_update_ui(false)
 
 func _order_move(point:Vector3)->void:
 	if _ranch_busy(str(active.role)):
@@ -451,6 +462,12 @@ func _order_move(point:Vector3)->void:
 		brother.navigate_to(point)
 		retreat_until = float(state.elapsed)+10
 		return
+	# RTS convention: a plain ground click replaces the current queue (the hero
+	# reacts immediately); Shift+click appends the move to the end of the queue.
+	if not Input.is_key_pressed(KEY_SHIFT) and not orders[active.role].is_empty():
+		_end_job(active.role)
+		orders[active.role].clear()
+		state.characters[active.role].work_mode=""
 	_enqueue(active.role,{"action":"move","position":point,"phase":"waiting"})
 	movement_mark.position=point+Vector3(0,.3,0)
 	movement_mark.show()
@@ -465,7 +482,7 @@ func _cancel_order(index:int)->void:
 		active.stop_moving()
 		active.play_action("idle")
 	queue.remove_at(index)
-	_update_ui()
+	_update_ui(false)
 
 func _clear_orders()->void:
 	state.characters[active.role].work_mode=""
@@ -473,7 +490,7 @@ func _clear_orders()->void:
 	orders[active.role].clear()
 	active.stop_moving()
 	active.play_action("idle")
-	_update_ui()
+	_update_ui(false)
 
 func _movement_failed(role:String)->void:
 	if orders.has(role) and not orders[role].is_empty() and not _role_in_combat(role) and not _caravan_busy(role):
@@ -526,7 +543,7 @@ func _process(delta:float)->void:
 	if pulse<=0:
 		pulse=.2
 		_advance()
-		_update_ui()
+		_update_ui(false)
 	hover_tick-=delta
 	if hover_tick<=0:
 		hover_tick=.12
@@ -537,7 +554,7 @@ func _process(delta:float)->void:
 	if current_dialogue.is_empty() and not dialogue_queue.is_empty():
 		_display_next()
 	realtime_tick+=delta/maxf(.01,Engine.time_scale)
-	if realtime_tick>=10:
+	if realtime_tick>=30:
 		realtime_tick=0
 		_save_slot("realtime",false)
 	state.auto_elapsed=float(state.auto_elapsed)+delta/maxf(.01,Engine.time_scale)
@@ -598,13 +615,18 @@ func _run_order(role:String,delta:float)->void:
 		actor.set_hidden_in_cover(false)
 		order.phase="walking"
 		if _flat_distance(actor.position,target)>reach and not actor.navigate_to(target):
-			if not queue.is_empty() and queue[0]==order: queue.pop_front()
+			if not queue.is_empty() and is_same(queue[0],order):
+				if life: life.cancel(role)
+				queue.pop_front()
+				hud.toast("Не удалось проложить путь. Остальные действия остались в очереди.")
 			return
 	if order.phase=="walking":
 		if _flat_distance(actor.position,target)>reach:
 			if not actor.is_moving():
 				queue.pop_front()
-				hud.toast("Подход закрыт. Выберите другое место рядом.")
+				# A ground click on a blocked spot (wall, tree, water edge) ends at the
+				# nearest reachable point: that is a successful move, not an error.
+				if action!="move": hud.toast("Подход закрыт. Выберите другое место рядом.")
 			return
 		actor.stop_moving()
 		if action=="move":
@@ -733,7 +755,9 @@ func _run_ranch_order(role:String,delta:float)->void:
 			if float(order.repath)<=0:
 				order.repath=2.0
 				if not actor.navigate_to(target):
-					if not queue.is_empty() and queue[0]==order: queue.pop_front()
+					if not queue.is_empty() and is_same(queue[0],order):
+						queue.pop_front()
+						hud.toast("Не удалось подойти к животному.")
 			return
 		actor.stop_moving()
 		var reason:String=ranch.validate(order.action,id,_person(role))
@@ -800,7 +824,7 @@ func _finish_action(action:String,id:String,role:String)->void:
 			hud.toast(actor.display_name+" отдохнул у огня.")
 		"cook","brew":
 			if role==active.role:
-				hud.show_crafting()
+				hud.show_crafting_at(str(obj.type),id)
 			else:
 				hud.toast(actor.display_name+" подошёл к месту ремесла. Выберите его для крафта.")
 		"hide":
@@ -851,9 +875,14 @@ func _craft(id:String,target_id:String="")->void:
 	if str(recipe.station)=="cauldron" and not person.alchemy_learned:
 		hud.toast("Сначала нужен урок травницы.")
 		return
-	if target_id.is_empty(): target_id=industry.find_station(id,active.position)
+	# Contextual crafting: station recipes run only at the station the hero is
+	# using (opened from it or standing next to it); no silent cross-map walk.
+	if target_id.is_empty() and not str(recipe.station).is_empty():
+		var context:Dictionary=hud.craft_context()
+		if str(context.get("kind",""))==str(recipe.station) and world.objects.has(str(context.get("id",""))):
+			target_id=str(context.id)
 	if not str(recipe.station).is_empty() and target_id.is_empty():
-		hud.toast("Сначала найдите или постройте подходящий станок.")
+		hud.toast("Этот рецепт делается у станка: "+str(hud.STATIONS.get(str(recipe.station),str(recipe.station)))+". Подойдите к нему.")
 		return
 	var order:Dictionary={"action":"craft:"+id,"id":target_id,"phase":"waiting","remaining":0.0}
 	if target_id.is_empty(): order.position=active.position
@@ -1019,6 +1048,22 @@ func _follow()->void:
 		if distance>7 and not follower.is_moving(): follower.navigate_to(leader.position+(follower.position-leader.position).normalized()*3)
 		elif distance<3: follower.stop_moving()
 
+
+const CRAFT_STATIONS:=["campfire","workbench","sawmill","smelter","anvil","cauldron"]
+
+## Nearest usable crafting station within arm's reach of the hero (for the C window).
+func _craft_context(from:Vector3)->Dictionary:
+	var best:=4.0
+	var found:={"kind":"","id":""}
+	for id in world.objects:
+		var obj:Dictionary=world.objects[id]
+		if not str(obj.type) in CRAFT_STATIONS: continue
+		if not is_instance_valid(obj.node) or not obj.node.visible: continue
+		var d:=_flat_distance(from,obj.get("approach",obj.position))
+		if d<best:
+			best=d
+			found={"kind":str(obj.type),"id":str(id)}
+	return found
 
 func _nearest_type(kind:String,from:Vector3,limit:float)->String:
 	var found:=""
@@ -1378,7 +1423,7 @@ func _queue_label(order:Dictionary)->String:
 	var names:={"gather":"Собрать","mine":"Добыть","talk":"Поговорить","rest":"Отдохнуть","sleep":"Спать","drink":"Попить","fill":"Набрать воду","attack":"Атаковать","hide":"Спрятаться","brew":"К котелку","cook":"К костру","feed":"Накормить","water_animal":"Напоить","search":"Осмотреть","chop":"Рубить","farm_till":"Вскопать","farm_water":"Полить","farm_tend":"Ухаживать","farm_harvest":"Собрать урожай","farm_plant_carrot":"Посадить морковь","farm_plant_herb":"Посеять травы","farm_plant_apple":"Посадить яблоню","farm_store":"Отнести урожай","farm_take_supplies":"Взять семена","farm_take_produce":"Взять продукты","recruit":"Пригласить","store_all":"Сложить вещи","take_all":"Забрать вещи"}
 	return str(names.get(order.action,order.action))+" · "+str(world.objects.get(order.get("id",""),{}).get("name",""))
 
-func _update_ui()->void:
+func _update_ui(force_life:bool=true)->void:
 	if hud==null: return
 	var selected:Dictionary=state.characters[active.role]
 	var skills:Dictionary={}
@@ -1416,8 +1461,9 @@ func _update_ui()->void:
 		"region":recent_region,"game_time":caravan.get_clock_text(),"night":caravan.is_night(),"stage":state.stage,
 		"animal":animal,"cart":{"mode":caravan.mode,"storage":caravan.storage.duplicate(true),"driver":"brother" if caravan.mode=="hand" else "animal","passengers":caravan.passengers.duplicate(),"available":true},
 		"save_slots":slot_cache,"alchemy_learned":state.flags.get("alchemy_learned",false),"near_cauldron":not _nearest_type("cauldron",active.position,2.5).is_empty(),
+		"craft_context":_craft_context(active.position),
 		"dialogue_more":not dialogue_queue.is_empty(),"journal_text":journal})
-	if life: life.update_ui()
+	if life: life.update_ui(force_life)
 
 func _show_map()->void:
 	var points:Array[Dictionary]=[]
@@ -1483,7 +1529,9 @@ func _snapshot()->Dictionary:
 
 func _save_slot(id:String,notify:bool=true)->void:
 	var error:Error=saves.write_slot(id,_snapshot())
-	slot_cache=saves.list_slots()
+	# Re-reading and parsing all ten save files after every 10-second realtime
+	# save caused a periodic frame hitch; only refresh the list when it is shown.
+	if notify or get_tree().paused or slot_cache.is_empty(): slot_cache=saves.list_slots()
 	if notify:
 		hud.toast("Сохранено в отдельную ячейку." if error==OK else "Ошибка записи сохранения.")
 	if get_tree().paused:
