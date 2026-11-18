@@ -10,6 +10,11 @@ var _grid := AStarGrid2D.new()
 var _obstacles: Dictionary = {}
 var _dynamic: Dictionary = {}
 var _dynamic_points: Array = []
+# Lightweight profiling counters (read by tests/playtest.gd; negligible cost).
+var stats_calls := 0
+var stats_usec := 0
+var stats_max_usec := 0
+var stats_failed := 0
 
 
 func configure(sampler: Callable, area: Rect2, obstacles: Array) -> void:
@@ -117,6 +122,18 @@ func _nearby(p: Vector2) -> Vector2i:
 
 
 func path(start: Vector3, finish: Vector3) -> PackedVector3Array:
+	var t0 := Time.get_ticks_usec()
+	var result := _path(start, finish)
+	var spent := Time.get_ticks_usec() - t0
+	stats_calls += 1
+	stats_usec += spent
+	stats_max_usec = maxi(stats_max_usec, spent)
+	if result.is_empty():
+		stats_failed += 1
+	return result
+
+
+func _path(start: Vector3, finish: Vector3) -> PackedVector3Array:
 	var result := PackedVector3Array()
 	var a := Vector2(start.x, start.z)
 	var b := Vector2(finish.x, finish.z)
