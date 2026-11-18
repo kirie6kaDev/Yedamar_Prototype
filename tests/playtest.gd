@@ -621,12 +621,17 @@ func _phase_save_load() -> Dictionary:
 	game._load_slot("manual_1")
 	res.load_ms = snappedf((Time.get_ticks_usec() - t) / 1000.0, 0.1)
 	await frames(5)
-	res.inventory_restored = game._inventory("brother").hash() == inv_before.hash()
 	var diff := {}
+	var retyped := []
 	var now_inv: Dictionary = game._inventory("brother")
 	for k in now_inv.keys() + inv_before.keys():
 		if int(now_inv.get(k, 0)) != int(inv_before.get(k, 0)): diff[k] = [inv_before.get(k, 0), now_inv.get(k, 0)]
+		elif now_inv.has(k) and inv_before.has(k) and typeof(now_inv[k]) != typeof(inv_before[k]) and not retyped.has(k): retyped.append(k)
 	res.inventory_diff = diff
+	# value-equal is what matters; hash() also differs on key order / int-vs-float after JSON
+	res.inventory_restored = diff.is_empty()
+	res.inventory_hash_equal = now_inv.hash() == inv_before.hash()
+	res.inventory_retyped_keys = retyped
 	res.position_restored = dist(brother().position, pos_before) < 0.5
 	if not res.inventory_restored or not res.position_restored: issue("save", "save/load roundtrip mismatch", res)
 	return res
