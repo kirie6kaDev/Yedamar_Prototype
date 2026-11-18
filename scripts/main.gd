@@ -451,6 +451,12 @@ func _order_move(point:Vector3)->void:
 		brother.navigate_to(point)
 		retreat_until = float(state.elapsed)+10
 		return
+	# RTS convention: a plain ground click replaces the current queue (the hero
+	# reacts immediately); Shift+click appends the move to the end of the queue.
+	if not Input.is_key_pressed(KEY_SHIFT) and not orders[active.role].is_empty():
+		_end_job(active.role)
+		orders[active.role].clear()
+		state.characters[active.role].work_mode=""
 	_enqueue(active.role,{"action":"move","position":point,"phase":"waiting"})
 	movement_mark.position=point+Vector3(0,.3,0)
 	movement_mark.show()
@@ -598,13 +604,18 @@ func _run_order(role:String,delta:float)->void:
 		actor.set_hidden_in_cover(false)
 		order.phase="walking"
 		if _flat_distance(actor.position,target)>reach and not actor.navigate_to(target):
-			if not queue.is_empty() and queue[0]==order: queue.pop_front()
+			if not queue.is_empty() and is_same(queue[0],order):
+				if life: life.cancel(role)
+				queue.pop_front()
+				hud.toast("Не удалось проложить путь. Остальные действия остались в очереди.")
 			return
 	if order.phase=="walking":
 		if _flat_distance(actor.position,target)>reach:
 			if not actor.is_moving():
 				queue.pop_front()
-				hud.toast("Подход закрыт. Выберите другое место рядом.")
+				# A ground click on a blocked spot (wall, tree, water edge) ends at the
+				# nearest reachable point: that is a successful move, not an error.
+				if action!="move": hud.toast("Подход закрыт. Выберите другое место рядом.")
 			return
 		actor.stop_moving()
 		if action=="move":
@@ -733,7 +744,9 @@ func _run_ranch_order(role:String,delta:float)->void:
 			if float(order.repath)<=0:
 				order.repath=2.0
 				if not actor.navigate_to(target):
-					if not queue.is_empty() and queue[0]==order: queue.pop_front()
+					if not queue.is_empty() and is_same(queue[0],order):
+						queue.pop_front()
+						hud.toast("Не удалось подойти к животному.")
 			return
 		actor.stop_moving()
 		var reason:String=ranch.validate(order.action,id,_person(role))

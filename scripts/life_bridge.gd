@@ -13,6 +13,7 @@ var sim
 var citizens:Dictionary={}
 var proxies:Dictionary={}
 var motion_targets:Dictionary={}
+var motion_attempts:Dictionary={}
 var social_locks:Dictionary={}
 var house_stores:Dictionary={}
 var speed:=1.0
@@ -214,6 +215,7 @@ func _update_population()->void:
 		actor.queue_free()
 		citizens.erase(id)
 		motion_targets.erase(id)
+		motion_attempts.erase(id)
 	for id in wanted:
 		if not sim.residents.has(id) or game.state.characters.has(id): continue
 		var record:Dictionary=sim.residents[id]
@@ -241,8 +243,15 @@ func _update_population()->void:
 		else:
 			if not actor._work_clip.is_empty(): actor.end_work()
 			if game._flat_distance(actor.position,point)>1.5 and (motion_targets.get(id,"")!=target_key or not actor.is_moving()):
+				var retry:bool=motion_targets.get(id,"")==target_key
 				motion_targets[id]=target_key
-				if not actor.navigate_to(point): sim.report_unreachable(str(id),str(target.get("id","")))
+				motion_attempts[id]=int(motion_attempts.get(id,0))+1 if retry else 1
+				# Give up on a target the route cannot get close to instead of
+				# re-planning it every population tick forever (stuck, A* spam).
+				if int(motion_attempts[id])>3 or not actor.navigate_to(point) or actor.path_gap>1.5:
+					motion_attempts.erase(id)
+					motion_targets.erase(id)
+					sim.report_unreachable(str(id),str(target.get("id","")))
 	for role in game._roles():
 		if sim.residents.has(role): _present(game._hero(role),sim.residents[role])
 
@@ -390,7 +399,12 @@ func run_order(role:String,delta:float)->void:
 			return
 	if str(order.phase)=="walking":
 		if not portable and game._flat_distance(actor.position,target)>1.7:
-			if not actor.is_moving() and not actor.navigate_to(target): _finish_order(role,"Путь к месту закрыт.")
+			if not actor.is_moving():
+				# Arrived as close as the route allows but still too far: re-planning
+				# every frame used to loop forever (per-frame A* = lag, stuck hero).
+				order["repaths"]=int(order.get("repaths",0))+1
+				if int(order.repaths)>3 or not actor.navigate_to(target) or actor.path_gap>1.7:
+					_finish_order(role,"Путь к месту закрыт.")
 			return
 		actor.stop_moving()
 		if not venue_id.is_empty() and not sim.reserve(role,venue_id,action,float(spec.get("duration",10))+30):
