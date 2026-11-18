@@ -432,7 +432,7 @@ func _enqueue(role:String,order:Dictionary)->void:
 		hud.toast("В очереди уже 12 действий.")
 		return
 	orders[role].append(order)
-	_update_ui()
+	_update_ui(false)
 
 func _order_move(point:Vector3)->void:
 	if _ranch_busy(str(active.role)):
@@ -471,7 +471,7 @@ func _cancel_order(index:int)->void:
 		active.stop_moving()
 		active.play_action("idle")
 	queue.remove_at(index)
-	_update_ui()
+	_update_ui(false)
 
 func _clear_orders()->void:
 	state.characters[active.role].work_mode=""
@@ -479,7 +479,7 @@ func _clear_orders()->void:
 	orders[active.role].clear()
 	active.stop_moving()
 	active.play_action("idle")
-	_update_ui()
+	_update_ui(false)
 
 func _movement_failed(role:String)->void:
 	if orders.has(role) and not orders[role].is_empty() and not _role_in_combat(role) and not _caravan_busy(role):
@@ -532,7 +532,7 @@ func _process(delta:float)->void:
 	if pulse<=0:
 		pulse=.2
 		_advance()
-		_update_ui()
+		_update_ui(false)
 	hover_tick-=delta
 	if hover_tick<=0:
 		hover_tick=.12
@@ -543,7 +543,7 @@ func _process(delta:float)->void:
 	if current_dialogue.is_empty() and not dialogue_queue.is_empty():
 		_display_next()
 	realtime_tick+=delta/maxf(.01,Engine.time_scale)
-	if realtime_tick>=10:
+	if realtime_tick>=30:
 		realtime_tick=0
 		_save_slot("realtime",false)
 	state.auto_elapsed=float(state.auto_elapsed)+delta/maxf(.01,Engine.time_scale)
@@ -1391,7 +1391,7 @@ func _queue_label(order:Dictionary)->String:
 	var names:={"gather":"Собрать","mine":"Добыть","talk":"Поговорить","rest":"Отдохнуть","sleep":"Спать","drink":"Попить","fill":"Набрать воду","attack":"Атаковать","hide":"Спрятаться","brew":"К котелку","cook":"К костру","feed":"Накормить","water_animal":"Напоить","search":"Осмотреть","chop":"Рубить","farm_till":"Вскопать","farm_water":"Полить","farm_tend":"Ухаживать","farm_harvest":"Собрать урожай","farm_plant_carrot":"Посадить морковь","farm_plant_herb":"Посеять травы","farm_plant_apple":"Посадить яблоню","farm_store":"Отнести урожай","farm_take_supplies":"Взять семена","farm_take_produce":"Взять продукты","recruit":"Пригласить","store_all":"Сложить вещи","take_all":"Забрать вещи"}
 	return str(names.get(order.action,order.action))+" · "+str(world.objects.get(order.get("id",""),{}).get("name",""))
 
-func _update_ui()->void:
+func _update_ui(force_life:bool=true)->void:
 	if hud==null: return
 	var selected:Dictionary=state.characters[active.role]
 	var skills:Dictionary={}
@@ -1496,7 +1496,9 @@ func _snapshot()->Dictionary:
 
 func _save_slot(id:String,notify:bool=true)->void:
 	var error:Error=saves.write_slot(id,_snapshot())
-	slot_cache=saves.list_slots()
+	# Re-reading and parsing all ten save files after every 10-second realtime
+	# save caused a periodic frame hitch; only refresh the list when it is shown.
+	if notify or get_tree().paused or slot_cache.is_empty(): slot_cache=saves.list_slots()
 	if notify:
 		hud.toast("Сохранено в отдельную ячейку." if error==OK else "Ошибка записи сохранения.")
 	if get_tree().paused:

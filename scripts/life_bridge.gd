@@ -490,8 +490,17 @@ func context_actions(id:String,role:String)->Array[Dictionary]:
 func _action_name(action:String)->String:
 	return str({"eat":"Поесть","drink":"Попить","wash":"Искупаться / умыться","toilet":"Посетить отхожее место","sleep":"Поспать","relax":"Отдохнуть и развлечься","read":"Почитать","train":"Тренироваться","cook":"Приготовить еду","socialize":"Поговорить","joke":"Пошутить","compliment":"Похвалить","apologize":"Извиниться","insult":"Поссориться","flirt":"Флиртовать","propose":"Предложить брак","plan_child":"Планировать ребёнка","invite_household":"Предложить жить вместе","educate":"Учиться","work":"Работать","apply_job":"Устроиться на работу","buy":"Купить","sell":"Продать","move_home":"Переехать","buy_home":"Купить дом"}.get(action,action))
 
-func update_ui()->void:
+var _ui_next_ms:=0
+
+## force=false is the periodic 0.2 s HUD refresh. Building the full life-book
+## model (sim.ui_state + civic/domestic rows) costs ~45 ms, so while the life
+## window is closed it is rebuilt at most every 1.5 s (was a 5 Hz frame hitch).
+func update_ui(force:bool=true)->void:
 	if not _simulation_ready or not game.hud.has_method("update_life"): return
+	var open:bool=game.hud._life_ui!=null and game.hud._life_ui.panel.visible
+	var now:=Time.get_ticks_msec()
+	if not force and not open and now<_ui_next_ms: return
+	_ui_next_ms=now+1500
 	var data:Dictionary=sim.ui_state(str(game.active.role))
 	data.summary.speed=0 if game.get_tree().paused else Engine.time_scale
 	data.summary.speed_actions=[]
