@@ -430,7 +430,7 @@ func _phase_crafting() -> Dictionary:
 	var hand := []
 	for rid in Campaign.RECIPES: if str(Campaign.RECIPES[rid].station).is_empty(): hand.append(rid)
 	Engine.time_scale = 1.0
-	return {"recipes": results, "hand_recipes": hand, "station_recipe_far_from_station": far_request, "note": "C window lists every recipe regardless of location; _craft auto-walks to the nearest station of the needed type anywhere on the map"}
+	return {"recipes": results, "hand_recipes": hand, "station_recipe_far_from_station": far_request, "note": "baseline: C window lists every recipe and _craft auto-walks to the nearest station anywhere on the map; fixed: station recipes only at the station"}
 
 func _phase_queue_edges() -> Dictionary:
 	Engine.time_scale = 4.0
@@ -665,6 +665,16 @@ func _phase_walk_sample() -> Dictionary:
 
 ## Several in-game days at high time scale: frame cost, stuck agents, autonomy.
 func _phase_long_run() -> Dictionary:
+	# start in town so the near-LOD citizen actors actually exist around the hero
+	game._clear_orders()
+	if game.world.objects.has("life_job_blacksmith"):
+		var c: Vector3 = game.world.objects["life_job_blacksmith"].get("approach", game.world.objects["life_job_blacksmith"].position)
+		teleport("brother", c)
+		teleport("sister", c + Vector3(1.5, 0, 0))
+	await frames(10)
+	# life_bridge re-applies its own `speed` when the family wakes up (max 3x in UI), so set both
+	var old_speed: float = game.life.speed
+	game.life.speed = 10.0
 	Engine.time_scale = 10.0
 	var minutes := long_days * 1440.0
 	var frames_needed := int(minutes / (10.0 / 30.0))
@@ -689,7 +699,7 @@ func _phase_long_run() -> Dictionary:
 					if not tgt.is_empty() and str(tgt.get("phase", "walking")) != "working" and dist(p, game.life._vec(tgt.position)) > 2.0:
 						stuck[id] = int(stuck.get(id, 0)) + 1
 				last[id] = p
-			samples.append({"frame": k, "game_time": game.caravan.get_clock_text(), "citizens": game.life.citizens.size(), "moving": moving, "nav_calls": game.navigation.stats_calls if "stats_calls" in game.navigation else -1})
+			samples.append({"frame": k, "game_time": game.caravan.get_clock_text(), "citizens": game.life.citizens.size(), "moving": moving, "nav_calls": game.navigation.stats_calls if "stats_calls" in game.navigation else -1, "in_combat": game.in_combat, "zombies": game.settlement.zombies.size(), "hp": snappedf(game.brother.health, 0.1), "time_scale": Engine.time_scale})
 	var blocked_total := 0
 	for rid in game.life.sim.residents:
 		blocked_total += game.life.sim.residents[rid].get("blocked", {}).size()
@@ -697,4 +707,5 @@ func _phase_long_run() -> Dictionary:
 	for id in stuck: if stuck[id] >= 3: chronic.append({"id": id, "samples_stuck": stuck[id]})
 	if not chronic.is_empty(): issue("nav", "%d citizens repeatedly idle far from their walking target (stuck)" % chronic.size(), chronic.slice(0, 10))
 	Engine.time_scale = 1.0
+	game.life.speed = old_speed
 	return {"days_requested": long_days, "frames": frames_needed, "day_start": day0, "day_end": int(game.caravan.day_number), "samples": samples, "stuck": chronic, "resident_blocked_venues": blocked_total, "toast_count": toasts.size() - t0, "brother_needs": {"hunger": game.state.characters.brother.hunger, "thirst": game.state.characters.brother.thirst, "sleep": game.state.characters.brother.sleep, "health": game.brother.health}}
