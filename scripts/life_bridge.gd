@@ -441,6 +441,11 @@ func run_order(role:String,delta:float)->void:
 			game._update_ui()
 
 func _finish_order(role:String,message:String,notify:bool=true)->void:
+	# Autonomous (automatic) orders fail silently; their reasons ("Собеседник
+	# занят.", "Путь к месту закрыт.") used to spam the player with toasts about
+	# things they never asked for.
+	if not game.orders[role].is_empty() and bool(game.orders[role][0].get("automatic",false)):
+		notify=false
 	cancel(role)
 	game._hero(role).stop_moving()
 	game._hero(role).end_work()
