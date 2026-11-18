@@ -155,6 +155,25 @@ func _workplace(profession:String)->String:
 	return station if venues.has(station) else str(professions[profession].venue_id)
 
 
+func _hire_profession(business_id:String,worker:Dictionary,reserved:Dictionary={})->String:
+	# Keep a worker's existing role at this workplace; otherwise fill an unstaffed role instead of always the first catalog entry.
+	var current:String=str(worker.get("profession",""))
+	if professions.has(current) and str(professions[current].venue_id)==business_id:
+		return current
+	var taken:Dictionary=reserved.duplicate()
+	for worker_id in businesses.get(business_id,{}).get("employees",[]):
+		if not residents.has(str(worker_id)): continue
+		var job:String=str(residents[worker_id].profession)
+		if professions.has(job) and str(professions[job].venue_id)==business_id:
+			taken[job]=true
+	var fallback:String=""
+	for job:String in professions:
+		if str(professions[job].venue_id)!=business_id: continue
+		if fallback.is_empty(): fallback=job
+		if not taken.has(job): return job
+	return fallback
+
+
 func _point_array(venue_id:String)->Array:
 	return venues.get(venue_id,{}).get("position",[3510.0,65.0,3698.0]).duplicate()
 
@@ -987,12 +1006,13 @@ func ui_state(selected_id:String,issuer:String="local")->Dictionary:
 		if business.owner==own_id:
 			for markup:float in [.8,1.0,1.2,1.5]: actions.append(_ui_action(selected_id,"set_price","Цены ×%.1f" % markup,{"business_id":id,"markup":markup},issuer))
 			var offered:int=0
+			var reserved:Dictionary={}
 			for worker_id:String in residents:
 				var worker:Dictionary=residents[worker_id]
 				if not _adult(worker) or worker.external or business.employees.has(worker_id): continue
-				var profession:String=""
-				for job_id:String in professions:
-					if professions[job_id].venue_id==id: profession=job_id; break
+				var profession:String=_hire_profession(id,worker,reserved)
+				if profession.is_empty(): continue
+				reserved[profession]=true
 				actions.append(_ui_action(selected_id,"hire_worker","Нанять: "+str(worker.name),{"business_id":id,"worker_id":worker_id,"profession_id":profession},issuer)); offered+=1
 				if offered>=3: break
 		result.properties.append(_row(id,str(venues.get(id,{}).get("name",id))+" · предприятие",["Владелец: "+str(households.get(business.owner,{}).get("name","Городское предприятие")),"Покупка %d монет · работников %d · прибыль %d" % [business.price,business.employees.size(),business.profits],"Цены ×%.2f · завышенная цена снижает спрос" % business.markup],actions))

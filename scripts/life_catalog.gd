@@ -82,31 +82,85 @@ const SEASONS := ["Весна","Лето","Осень","Зима"]
 const WEEKDAYS := ["День Луны","День Ремёсел","День Рынка","День Садов","День Путников","День Очагов","День Отдыха"]
 
 static func professions() -> Dictionary:
+	# Explicit per-role table. Name and workplace come from city_world.gd so identifiers stay in sync.
+	var weekday:Array=[0,1,2,3,4,5]
+	var everyday:Array=[0,1,2,3,4,5,6]
+	var school_days:Array=[0,1,2,3,4]
+	var defs:Dictionary={
+		"farmer":{"skill":"farming","wage":20,"start":8,"end":17,"days":weekday,"inputs":{},"outputs":{"wheat":5,"carrot":2},"service":""},
+		"gardener":{"skill":"farming","wage":20,"start":8,"end":17,"days":weekday,"inputs":{},"outputs":{"herb":3,"apple":2},"service":""},
+		"shepherd":{"skill":"animal_husbandry","wage":22,"start":8,"end":17,"days":weekday,"inputs":{"hay":1},"outputs":{"milk":3,"wool":1},"service":""},
+		"blacksmith":{"skill":"blacksmithing","wage":36,"start":8,"end":17,"days":weekday,"inputs":{"ore":2,"coal":1},"outputs":{"iron_ingot":2},"service":""},
+		"carpenter":{"skill":"carpentry","wage":28,"start":8,"end":17,"days":weekday,"inputs":{"log":1},"outputs":{"plank":4},"service":""},
+		"mason":{"skill":"carpentry","wage":27,"start":8,"end":17,"days":weekday,"inputs":{},"outputs":{"stone":4},"service":""},
+		"tailor":{"skill":"tailoring","wage":30,"start":8,"end":17,"days":weekday,"inputs":{"wool":2},"outputs":{"cloth":3,"clothing":1},"service":""},
+		"leatherworker":{"skill":"leatherworking","wage":27,"start":8,"end":17,"days":weekday,"inputs":{"hide":2},"outputs":{"leather":3},"service":""},
+		"potter":{"skill":"pottery","wage":25,"start":8,"end":17,"days":weekday,"inputs":{"stone":1},"outputs":{"pottery":2},"service":""},
+		"jeweler":{"skill":"jewelry","wage":40,"start":8,"end":17,"days":weekday,"inputs":{"iron_ingot":1},"outputs":{"jewelry":1},"service":""},
+		"merchant":{"skill":"trade","wage":30,"start":8,"end":18,"days":weekday,"inputs":{},"outputs":{},"service":"community"},
+		"innkeeper":{"skill":"trade","wage":28,"start":14,"end":23,"days":everyday,"inputs":{},"outputs":{},"service":"community"},
+		"cook":{"skill":"cooking","wage":26,"start":10,"end":20,"days":weekday,"inputs":{"carrot":2,"fish":1},"outputs":{"meal":5},"service":""},
+		"baker":{"skill":"cooking","wage":25,"start":5,"end":13,"days":weekday,"inputs":{"flour":2,"wood":1},"outputs":{"bread":7},"service":""},
+		"brewer":{"skill":"cooking","wage":26,"start":8,"end":17,"days":weekday,"inputs":{"wheat":2},"outputs":{"ale":4},"service":""},
+		"teacher":{"skill":"teaching","wage":26,"start":9,"end":16,"days":school_days,"inputs":{},"outputs":{},"service":"education"},
+		"mentor":{"skill":"teaching","wage":28,"start":9,"end":16,"days":school_days,"inputs":{},"outputs":{},"service":"education"},
+		"librarian":{"skill":"teaching","wage":25,"start":9,"end":17,"days":weekday,"inputs":{},"outputs":{},"service":"education"},
+		"scribe":{"skill":"reading","wage":27,"start":8,"end":17,"days":weekday,"inputs":{"paper":2},"outputs":{"book":1},"service":""},
+		"clerk":{"skill":"literacy","wage":26,"start":8,"end":17,"days":weekday,"inputs":{},"outputs":{},"service":"community"},
+		"guard":{"skill":"combat","wage":28,"start":20,"end":6,"days":everyday,"inputs":{},"outputs":{},"service":"safety"},
+		"guard_captain":{"skill":"combat","wage":34,"start":8,"end":17,"days":everyday,"inputs":{},"outputs":{},"service":"safety"},
+		"healer":{"skill":"herbalism","wage":32,"start":8,"end":18,"days":everyday,"inputs":{"herb":2},"outputs":{"remedy":2},"service":""},
+		"herbalist":{"skill":"herbalism","wage":22,"start":8,"end":17,"days":weekday,"inputs":{},"outputs":{"herb":4},"service":""},
+		"groom":{"skill":"animal_husbandry","wage":20,"start":6,"end":15,"days":everyday,"inputs":{},"outputs":{},"service":"community"},
+		"courier":{"skill":"trade","wage":22,"start":8,"end":17,"days":weekday,"inputs":{},"outputs":{},"service":"community"},
+		"carrier":{"skill":"trade","wage":23,"start":8,"end":17,"days":weekday,"inputs":{},"outputs":{},"service":"community"},
+		"builder":{"skill":"carpentry","wage":28,"start":8,"end":17,"days":weekday,"inputs":{},"outputs":{},"service":"community"},
+		"street_cleaner":{"skill":"athletics","wage":18,"start":6,"end":14,"days":everyday,"inputs":{},"outputs":{},"service":"community"},
+		"steward":{"skill":"trade","wage":32,"start":8,"end":17,"days":weekday,"inputs":{},"outputs":{},"service":"community"},
+		"hunter":{"skill":"tracking","wage":26,"start":8,"end":17,"days":weekday,"inputs":{},"outputs":{"meat":3,"hide":1},"service":""},
+		"tracker":{"skill":"tracking","wage":28,"start":8,"end":17,"days":weekday,"inputs":{},"outputs":{"research_notes":1},"service":""},
+		"guide":{"skill":"tracking","wage":26,"start":8,"end":17,"days":weekday,"inputs":{},"outputs":{},"service":"community"},
+		"scout":{"skill":"combat","wage":28,"start":6,"end":14,"days":weekday,"inputs":{},"outputs":{},"service":"safety"},
+		"hired_guard":{"skill":"combat","wage":27,"start":18,"end":2,"days":everyday,"inputs":{},"outputs":{},"service":"safety"},
+		"explorer":{"skill":"research","wage":32,"start":8,"end":17,"days":weekday,"inputs":{},"outputs":{"research_notes":2},"service":""},
+		"relic_hunter":{"skill":"research","wage":34,"start":8,"end":17,"days":weekday,"inputs":{},"outputs":{"research_notes":2},"service":""},
+		"cartographer":{"skill":"reading","wage":32,"start":8,"end":17,"days":weekday,"inputs":{"paper":2},"outputs":{"map":1},"service":""},
+		"monster_hunter":{"skill":"combat","wage":36,"start":8,"end":17,"days":weekday,"inputs":{},"outputs":{},"service":"safety"},
+		"alchemist":{"skill":"alchemy","wage":36,"start":8,"end":17,"days":weekday,"inputs":{"herb":2,"water":1},"outputs":{"tonic":2},"service":""},
+		"magic_researcher":{"skill":"research","wage":36,"start":8,"end":17,"days":weekday,"inputs":{"paper":1},"outputs":{"research_notes":2},"service":""},
+		"artificer":{"skill":"crafting","wage":38,"start":8,"end":17,"days":weekday,"inputs":{"iron_ingot":1,"research_notes":1},"outputs":{"ward_charm":2},"service":""},
+		"magical_healer":{"skill":"herbalism","wage":36,"start":8,"end":18,"days":everyday,"inputs":{"herb":2},"outputs":{"remedy":3},"service":""},
+		"ward_specialist":{"skill":"crafting","wage":34,"start":8,"end":17,"days":weekday,"inputs":{"wood":1,"herb":1},"outputs":{"ward_charm":1},"service":""},
+		"arcane_mentor":{"skill":"teaching","wage":34,"start":10,"end":18,"days":school_days,"inputs":{},"outputs":{},"service":"education"},
+		"musician":{"skill":"performance","wage":26,"start":14,"end":22,"days":everyday,"inputs":{},"outputs":{},"service":"culture"},
+		"singer":{"skill":"performance","wage":26,"start":14,"end":22,"days":everyday,"inputs":{},"outputs":{},"service":"culture"},
+		"dancer":{"skill":"performance","wage":25,"start":14,"end":22,"days":everyday,"inputs":{},"outputs":{},"service":"culture"},
+		"actor":{"skill":"performance","wage":27,"start":14,"end":22,"days":everyday,"inputs":{},"outputs":{},"service":"culture"},
+		"storyteller":{"skill":"performance","wage":24,"start":14,"end":22,"days":everyday,"inputs":{},"outputs":{},"service":"culture"},
+		"street_artist":{"skill":"performance","wage":26,"start":14,"end":22,"days":everyday,"inputs":{"wood":1},"outputs":{"artwork":1},"service":""},
+		"impresario":{"skill":"performance","wage":30,"start":14,"end":22,"days":everyday,"inputs":{},"outputs":{},"service":"culture"},
+		"miner":{"skill":"mining","wage":25,"start":8,"end":17,"days":weekday,"inputs":{},"outputs":{"ore":4,"coal":2},"service":""},
+		"lumberjack":{"skill":"woodcutting","wage":26,"start":8,"end":17,"days":weekday,"inputs":{},"outputs":{"log":3,"wood":4},"service":""},
+		"miller":{"skill":"crafting","wage":23,"start":8,"end":17,"days":weekday,"inputs":{"wheat":3},"outputs":{"flour":6},"service":""},
+		"fisher":{"skill":"fishing","wage":23,"start":6,"end":14,"days":weekday,"inputs":{},"outputs":{"fish":4},"service":""},
+	}
 	var result:Dictionary={}
 	for id:String in City.PROFESSION_NAMES:
-		result[id]={"id":id,"name":City.PROFESSION_NAMES[id],"venue_id":City.PROFESSION_VENUES[id],"skill":"crafting","wage":24,"start":8,"end":17,"days":[0,1,2,3,4,5],"inputs":{},"outputs":{},"service":"community","minimum_age":18}
-	var rules:Dictionary={
-		"farmer":["farming",20,{}, {"wheat":5,"carrot":2}],"gardener":["farming",20,{}, {"herb":3,"apple":2}],"shepherd":["animal_husbandry",22,{"hay":1},{"milk":3,"wool":1}],
-		"blacksmith":["blacksmithing",36,{"ore":2,"coal":1},{"iron_ingot":2}],"carpenter":["carpentry",28,{"log":1},{"plank":4}],"mason":["carpentry",27,{}, {"stone":4}],
-		"tailor":["tailoring",30,{"wool":2},{"cloth":3,"clothing":1}],"leatherworker":["leatherworking",27,{"hide":2},{"leather":3}],"potter":["pottery",25,{"stone":1},{"pottery":2}],"jeweler":["jewelry",40,{"iron_ingot":1},{"jewelry":1}],
-		"cook":["cooking",24,{"carrot":2,"fish":1},{"meal":5}],"baker":["cooking",24,{"flour":2,"wood":1},{"bread":7}],"brewer":["cooking",26,{"wheat":2},{"ale":4}],
-		"healer":["herbalism",32,{"herb":2},{"remedy":2}],"herbalist":["herbalism",24,{}, {"herb":4}],"scribe":["reading",27,{"paper":2},{"book":1}],
-		"hunter":["tracking",26,{}, {"meat":3,"hide":1}],"tracker":["tracking",28,{}, {"research_notes":1}],"explorer":["research",32,{}, {"research_notes":2}],"relic_hunter":["research",34,{}, {"research_notes":2}],
-		"cartographer":["reading",32,{"paper":2},{"map":1}],"alchemist":["alchemy",36,{"herb":2,"water":1},{"tonic":2}],"magic_researcher":["research",36,{"paper":1},{"research_notes":2}],
-		"artificer":["crafting",38,{"iron_ingot":1,"research_notes":1},{"ward_charm":2}],"magical_healer":["herbalism",36,{"herb":2},{"remedy":3}],"ward_specialist":["crafting",34,{"wood":1,"herb":1},{"ward_charm":1}],
-		"miner":["mining",25,{}, {"ore":4,"coal":2}],"lumberjack":["woodcutting",24,{}, {"log":3,"wood":4}],"miller":["crafting",23,{"wheat":3},{"flour":6}],"fisher":["fishing",23,{}, {"fish":4}],"street_artist":["performance",26,{"wood":1},{"artwork":1}]
-	}
-	for id:String in rules:
-		var row:Array=rules[id]
-		result[id].skill=row[0]; result[id].wage=row[1]; result[id].inputs=row[2]; result[id].outputs=row[3]; result[id].service=""
-	for id:String in ["merchant","innkeeper","courier","carrier","steward"]: result[id].skill="trade"
-	for id:String in ["teacher","mentor","librarian","arcane_mentor"]: result[id].skill="teaching"; result[id].service="education"
-	for id:String in ["guard","guard_captain","hired_guard","monster_hunter","scout"]: result[id].skill="combat"; result[id].service="safety"
-	for id:String in ["guide"]: result[id].skill="tracking"
-	for id:String in ["groom"]: result[id].skill="animal_husbandry"
-	for id:String in ["musician","singer","dancer","actor","storyteller","impresario"]: result[id].skill="performance"; result[id].service="culture"; result[id].start=14; result[id].end=22
-	result.guard.start=20; result.guard.end=6; result.guard.days=[0,1,2,3,4,5,6]
-	result.innkeeper.start=14; result.innkeeper.end=23
+		var def:Dictionary=defs[id]
+		result[id]={
+			"id":id,
+			"name":City.PROFESSION_NAMES[id],
+			"venue_id":City.PROFESSION_VENUES[id],
+			"skill":str(def.skill),
+			"wage":int(def.wage),
+			"start":int(def.start),
+			"end":int(def.end),
+			"days":def.days.duplicate(),
+			"inputs":def.inputs.duplicate(),
+			"outputs":def.outputs.duplicate(),
+			"service":str(def.service),
+			"minimum_age":int(def.get("minimum_age",18)),
+		}
 	return result
 
 static func stage(age:float)->String:
