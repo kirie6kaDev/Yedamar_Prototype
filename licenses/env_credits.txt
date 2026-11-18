@@ -1,0 +1,13 @@
+Environment models
+Kenney — Nature Kit 2.1
+https://kenney.nl/assets/nature-kit
+Kenney — Fantasy Town Kit 2.0
+https://kenney.nl/assets/fantasy-town-kit
+Both distributed under Creative Commons Zero (CC0 1.0 Universal).
+https://creativecommons.org/publicdomain/zero/1.0/
+Downloaded directly from the official Kenney site on 2026-11-17.
+Original package license files accompany this notice.
+Models are rescaled and assembled into houses, fields, forest clusters and a mine camp.
+Terrain is the user's interpreted Yedamar heightmap. The roads, simple barrel/crate/hay
+geometry and site layout are original project content generated for this prototype.
+Material adjustments: foliage, bark and stone use a natural palette with nonmetal rough surfaces. Roofs use terracotta; town palette textures are embedded in their GLBs.

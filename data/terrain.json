@@ -1,0 +1,283 @@
+{
+  "name_ru": "Равнины Лиора — стартовый участок у Арденхольма",
+  "width_samples": 609,
+  "height_samples": 385,
+  "master_crop_inclusive_xyxy": [
+    384,
+    608,
+    992,
+    992
+  ],
+  "horizontal_spacing_m": 5.208333333333333,
+  "world_origin_northwest_xz_m": [
+    2000.0,
+    3166.6666666666665
+  ],
+  "world_last_vertex_southeast_xz_m": [
+    5166.666666666666,
+    5166.666666666666
+  ],
+  "extent_m": [
+    3166.6666666666665,
+    2000.0
+  ],
+  "axis": "X east, Y up, Z south; row 0 north. Heights in metres relative to sea level.",
+  "encoding": {
+    "png": "starter_liora_height_16.png",
+    "png_color": "single channel unsigned 16-bit grayscale",
+    "raw": "starter_liora.r16",
+    "raw_format": "unsigned 16-bit little-endian; row-major X fastest; no header",
+    "height_m": "sample * 0.025 - 220.0",
+    "sea_sample": 8800,
+    "actual_height_range_m": [
+      -56.3,
+      193.6
+    ],
+    "actual_sample_range": [
+      6548,
+      16544
+    ],
+    "distinct_height_codes": 9802
+  },
+  "region_ids": {
+    "file": "starter_liora_regions_id.png",
+    "type": "8-bit grayscale; exact categorical IDs; sample with nearest-neighbour",
+    "ids_in_crop": {
+      "0": "Вода",
+      "1": "Лесистые возвышенности Эйвара",
+      "3": "Равнины Лиора"
+    }
+  },
+  "points_of_interest": {
+    "start": {
+      "name_ru": "Старт игрока",
+      "status": "planned",
+      "note_ru": "Точка старта на равнине между штольней и фермой.",
+      "region_id": 3,
+      "reference_xy_px": [
+        318.0,
+        416.0
+      ],
+      "crop_pixel_x_row": [
+        252,
+        224
+      ],
+      "master_pixel_x_row": [
+        636,
+        832
+      ],
+      "world_xyz_m": [
+        3312.5,
+        63.65,
+        4333.3333
+      ],
+      "height_m": 63.65,
+      "slope_degrees": 0.275
+    },
+    "farm": {
+      "name_ru": "Автономная ферма",
+      "status": "planned",
+      "note_ru": "Самостоятельное хозяйство у Арденхольма. Границы участка заданы отдельно от города.",
+      "region_id": 3,
+      "reference_xy_px": [
+        387.0,
+        421.0
+      ],
+      "crop_pixel_x_row": [
+        390,
+        234
+      ],
+      "master_pixel_x_row": [
+        774,
+        842
+      ],
+      "world_xyz_m": [
+        4031.25,
+        75.625,
+        4385.4167
+      ],
+      "height_m": 75.625,
+      "slope_degrees": 0.972
+    },
+    "adit": {
+      "name_ru": "Штольня",
+      "status": "planned",
+      "note_ru": "Проектная площадка входа в шахту к западу от старта.",
+      "region_id": 3,
+      "reference_xy_px": [
+        266.0,
+        418.0
+      ],
+      "crop_pixel_x_row": [
+        148,
+        228
+      ],
+      "master_pixel_x_row": [
+        532,
+        836
+      ],
+      "world_xyz_m": [
+        2770.8333,
+        153.7,
+        4354.1667
+      ],
+      "height_m": 153.7,
+      "slope_degrees": 4.673
+    },
+    "western_mine": {
+      "name_ru": "Западный рудник",
+      "status": "interpreted_reference",
+      "note_ru": "Примерная привязка к знаку ресурсов на художественной карте. Тип рудника выбран для игры.",
+      "region_id": 3,
+      "reference_xy_px": [
+        224.0,
+        375.0
+      ],
+      "crop_pixel_x_row": [
+        64,
+        142
+      ],
+      "master_pixel_x_row": [
+        448,
+        750
+      ],
+      "world_xyz_m": [
+        2333.3333,
+        85.85,
+        3906.25
+      ],
+      "height_m": 85.85,
+      "slope_degrees": 16.827
+    },
+    "ardenholm": {
+      "name_ru": "Арденхольм",
+      "status": "mapped_reference",
+      "note_ru": "Город на исходной карте. Метка обозначает ориентир местоположения.",
+      "region_id": 1,
+      "reference_xy_px": [
+        337.0,
+        355.0
+      ],
+      "crop_pixel_x_row": [
+        290,
+        102
+      ],
+      "master_pixel_x_row": [
+        674,
+        710
+      ],
+      "world_xyz_m": [
+        3510.4167,
+        149.125,
+        3697.9167
+      ],
+      "height_m": 149.125,
+      "slope_degrees": 2.915
+    },
+    "eivar": {
+      "name_ru": "Лес Эйвар",
+      "status": "biome_landmark",
+      "note_ru": "Ориентир внутри лесного региона. Ближайшая к старту опушка указана отдельно.",
+      "region_id": 1,
+      "reference_xy_px": [
+        438.0,
+        359.0
+      ],
+      "crop_pixel_x_row": [
+        492,
+        110
+      ],
+      "master_pixel_x_row": [
+        876,
+        718
+      ],
+      "world_xyz_m": [
+        4562.5,
+        139.975,
+        3739.5833
+      ],
+      "height_m": 139.975,
+      "slope_degrees": 4.495
+    }
+  },
+  "farm_plot": {
+    "name_ru": "Территория автономной фермы",
+    "status": "planned",
+    "coordinate_order": "outer ring, clockwise on north-up map; last vertex connects to first",
+    "polygon_crop_pixel_x_row": [
+      [
+        376,
+        226
+      ],
+      [
+        404,
+        226
+      ],
+      [
+        404,
+        242
+      ],
+      [
+        376,
+        242
+      ]
+    ],
+    "polygon_world_xz_m": [
+      [
+        3958.3333,
+        4343.75
+      ],
+      [
+        4104.1667,
+        4343.75
+      ],
+      [
+        4104.1667,
+        4427.0833
+      ],
+      [
+        3958.3333,
+        4427.0833
+      ]
+    ],
+    "principal_size_m": [
+      145.833,
+      83.333
+    ],
+    "area_m2": 12152.78,
+    "sampled_height_range_m": [
+      74.6,
+      76.875
+    ],
+    "sampled_slope_range_degrees": [
+      0.0,
+      1.609
+    ]
+  },
+  "slope_calculation": "degrees(atan(hypot(dY/dX,dY/dZ))); centered differences on source grid at 5.208333 m spacing.",
+  "straight_line_distances_m": {
+    "start_to_adit": 542.1,
+    "start_to_farm": 720.6,
+    "farm_to_ardenholm": 862.5,
+    "start_to_eivar": 1383.8
+  },
+  "authoring_ru": "Ферма, первая штольня и точка старта — проектные площадки. Координаты шести ориентиров заданы в JSON, показаны на обзорном листе и представлены узлами Marker3D в сцене Godot. PNG высот и R16 хранят рельеф.",
+  "sha256": {
+    "starter_liora_height_16.png": "0534fd560ba20b6bc0f6a9492f0cbc16f5a73b2939132a26b5145130cadd53c6",
+    "starter_liora.r16": "dd657ec0f3675409c40ad6f429870cbc2618b1089260213a3611dfac81f8d32a",
+    "starter_liora_regions_id.png": "1d5750b9d201bf0bf93f73db5d50ecba99df145fc15ffc1c34d7f182ba9d2b4b"
+  },
+  "nearest_eivar_from_start": {
+    "method": "nearest region ID 1 sample in horizontal plane",
+    "crop_pixel_x_row": [
+      272,
+      125
+    ],
+    "world_xyz_m": [
+      3416.6667,
+      103.125,
+      3817.7083
+    ],
+    "straight_line_distance_m": 526.0
+  }
+}

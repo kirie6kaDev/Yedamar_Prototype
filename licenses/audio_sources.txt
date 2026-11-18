@@ -1,0 +1,32 @@
+Downloaded sound assets — Yedamar prototype V2
+
+Kenney — Impact Sounds (CC0 1.0 Universal)
+https://kenney.nl/assets/impact-sounds
+The original package license accompanies this notice.
+Used files: footstep_grass_000..003.ogg, impactPunch_medium_000.ogg,
+impactPunch_medium_002.ogg, impactMining_000.ogg, impactMining_002.ogg,
+impactWood_light_000.ogg.
+
+Kenney — Interface Sounds (CC0 1.0 Universal)
+https://kenney.nl/assets/interface-sounds
+The original package license accompanies this notice.
+Used files: drop_002.ogg, confirmation_002.ogg, glass_003.ogg,
+error_004.ogg, click_002.ogg.
+
+Magnesus — Forest birds - ambient seamless loop (CC0 1.0)
+https://freesound.org/people/Magnesus/sounds/723913/
+Recorded by the author in a Polish forest; 27.051 seconds.
+Used downloaded public high-quality MP3 preview, preserved as
+day_forest_birds.mp3.
+https://cdn.freesound.org/previews/723/723913_2008500-hq.mp3
+
+Wolfgang_ / Ted Kerr — Crickets Ambient Noise - loopable (CC0 1.0)
+https://opengameart.org/content/crickets-ambient-noise-loopable
+Full source recording downloaded as night_crickets.mp3.
+https://opengameart.org/sites/default/files/crickets_1.mp3
+
+License for all of the above
+https://creativecommons.org/publicdomain/zero/1.0/
+
+Downloaded 2026-11-17. Files retain their source encoding. Runtime adjusts playback
+gain, varies impact/step pitch slightly, and crossfades the day/night ambience.
