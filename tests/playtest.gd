@@ -121,6 +121,12 @@ func gone(role: String, ref: Variant) -> bool:
 		if is_same(o, ref): return false
 	return true
 
+func diag(role: String) -> Dictionary:
+	var a = game._hero(role)
+	var q := []
+	for o in queue_of(role): q.append("%s:%s:%s%s" % [o.get("action"), o.get("id", ""), o.get("phase", ""), ":auto" if o.get("automatic", false) else ""])
+	return {"queue": q, "moving": a.is_moving(), "pos": [snappedf(a.position.x, 0.1), snappedf(a.position.z, 0.1)], "in_combat": game.in_combat, "role_in_combat": game._role_in_combat(role), "caravan_busy": game._caravan_busy(role), "caravan_mode": str(game.caravan.mode), "ranch_busy": game._ranch_busy(role), "sleeping": game.state.characters[role].get("sleeping", false), "dialogue": not game.current_dialogue.is_empty(), "paused": paused, "time": game.caravan.get_clock_text(), "zombies": game.settlement.zombies.size(), "hp": a.health}
+
 func dismiss_dialogue() -> void:
 	for i in 12:
 		if game.current_dialogue.is_empty() and game.dialogue_queue.is_empty(): return
@@ -135,6 +141,7 @@ func do_action(role: String, action: String, id: String, max_frames: int = 3000)
 	game._on_action(action, id)
 	var ref = last_order(role, action, id)
 	var used := await until(func(): return gone(role, ref), max_frames)
+	if used < 0: L("    TIMEOUT diag " + JSON.stringify(diag(role)))
 	dismiss_dialogue()
 	var target: Vector3 = game.world.objects[id].get("approach", game.world.objects[id].position) if game.world.objects.has(id) else start
 	return {"action": action, "id": id, "frames": used, "timeout": used < 0, "end_dist": snappedf(dist(game._hero(role).position, target), 0.01), "walked": snappedf(dist(start, game._hero(role).position), 0.1), "toasts": toasts.slice(t0)}
