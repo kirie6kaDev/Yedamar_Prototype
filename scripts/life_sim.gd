@@ -448,21 +448,31 @@ func _execute(id:String,action:String,payload:Dictionary)->Dictionary:
 			var job:Dictionary=professions[p.profession]
 			var multiplier:float=_trait_product(p,"productivity")*(.85+maxf(-30,float(p.mood))*.002)*(1+float(Catalog.skill_level(float(p.skills.get(job.skill,0)))-1)*.05)
 			if weather.id in ["rain","storm","snow"] and p.profession in ["farmer","gardener","hunter","lumberjack","fisher","shepherd"]: multiplier*=.85
-			var wage:int=maxi(1,roundi(float(job.wage)/8.0*multiplier*(1+.08*(int(p.career.level)-1))))
-			if int(market.treasury)<wage: return {"ok":false,"message":"Работодатель временно не может оплатить смену."}
+			if int(p.get("last_wage_day",-1))!=_day:
+				p.last_wage_day=_day
+				p.paid_minutes_today=0
+			var payable:bool=int(p.get("paid_minutes_today",0))<480
+			var wage:int=0
+			if payable:
+				wage=maxi(1,roundi(float(job.wage)/8.0*multiplier*(1+.08*(int(p.career.level)-1))))
+				p.paid_minutes_today=int(p.get("paid_minutes_today",0))+60
+			if wage>0 and int(market.treasury)<wage: return {"ok":false,"message":"Работодатель временно не может оплатить смену."}
 			for item:String in job.inputs: market.stocks[item]=int(market.stocks[item])-int(job.inputs[item])
 			for item:String in job.outputs:
 				var amount:int=maxi(1,roundi(int(job.outputs[item])*multiplier))
 				market.stocks[item]=int(market.stocks.get(item,0))+amount; market.production[item]=int(market.production.get(item,0))+amount
 			if not str(job.service).is_empty(): market.services[job.service]=minf(100,float(market.services.get(job.service,0))+multiplier)
-			market.treasury=int(market.treasury)-wage; home.coins=int(home.coins)+wage; home.income=int(home.income)+wage
+			if wage>0:
+				market.treasury=int(market.treasury)-wage; home.coins=int(home.coins)+wage; home.income=int(home.income)+wage
+				p.lifetime_wages=int(p.lifetime_wages)+wage
 			_business_profit(p,job,wage,multiplier)
-			p.career.work_minutes=float(p.career.work_minutes)+60; p.career.earned=int(p.career.earned)+wage; p.lifetime_wages=int(p.lifetime_wages)+wage
+			p.career.work_minutes=float(p.career.work_minutes)+60; p.career.earned=int(p.career.earned)+wage
 			p.career.performance=float(p.career.performance)+5*multiplier
 			var level:int=mini(10,1+floori(float(p.career.work_minutes)/1200))
 			if level>int(p.career.level): p.career.level=level; _remember(id,"promotion","Повышение",[job.name+" · ступень "+str(level)]); _event("promotion",p.name+" получил повышение",[job.name], [id])
 			_skill(id,str(job.skill),10); _change_need(id,"energy",-4); _change_need(id,"hygiene",-4)
-			message="Рабочий час завершён. Семья получила %d монет." % wage
+			if wage>0: message="Рабочий час завершён. Семья получила %d монет."%wage
+			else: message="Рабочий час завершён. Оплата за сегодня уже выдана за 8 часов."
 			extra={"wage":wage,"skill":job.skill}
 		"apply_job":
 			for business:Dictionary in businesses.values(): business.employees.erase(id)
@@ -565,6 +575,152 @@ func _food_item(p:Dictionary)->String:
 	for item:String in ["bread","carrot","apple","meal"]:
 		if int(market.stocks.get(item,0))>0 and int(house.coins)>=price(item): return item
 	return ""
+
+
+func _living_members(home:Dictionary)->Array:
+	var people:Array=[]
+	for id in home.members:
+		var mid:String=str(id)
+		if residents.has(mid) and bool(residents[mid].alive): people.append(mid)
+	return people
+
+
+func _food_units(inv:Dictionary)->int:
+	var total:=0
+	for item:String in inv:
+		if Catalog.GOODS.has(item) and Catalog.GOODS[item].has("food"):
+			total+=maxi(0,int(inv[item]))
+	return total
+
+
+func _shop_budget(home:Dictionary,members:Array)->int:
+	var reserve:int=maxi(40,12*members.size())
+	for id in members:
+		if residents[id].traits.has("frugal"):
+			reserve+=20
+			break
+	return maxi(0,int(home.coins)-reserve)
+
+
+func _shop_purchase(home:Dictionary,item:String,want:int,store:bool)->int:
+	if want<=0 or not Catalog.GOODS.has(item): return 0
+	var unit:int=price(item)
+	if unit<=0: return 0
+	var affordable:int=mini(want,int(market.stocks.get(item,0)))
+	affordable=mini(affordable,int(_shop_budget(home,_living_members(home))/unit))
+	if affordable<=0: return 0
+	var cost:int=unit*affordable
+	home.coins=int(home.coins)-cost
+	home.expenses=int(home.expenses)+cost
+	market.treasury=int(market.treasury)+cost
+	market.stocks[item]=int(market.stocks[item])-affordable
+	market.turnover=int(market.turnover)+cost
+	if store:
+		home.inventory[item]=int(home.inventory.get(item,0))+affordable
+	else:
+		market.consumed[item]=int(market.consumed.get(item,0))+affordable
+	return affordable
+
+
+func _food_order(members:Array)->Array:
+	var order:Array=["bread","carrot","apple","milk","fish","meal","meat","egg"]
+	var frugal:=false
+	var favorite:=""
+	for id in members:
+		if residents[id].traits.has("frugal"): frugal=true
+		if favorite.is_empty() and float(residents[id].age_years)>=13:
+			favorite=str(residents[id].preferences.get("food",""))
+	if frugal: return ["bread","carrot","apple","milk"]
+	if Catalog.GOODS.has(favorite) and Catalog.GOODS[favorite].has("food"):
+		order.erase(favorite)
+		order.push_front(favorite)
+	return order
+
+
+func _treat_sick(members:Array)->void:
+	var worst:String=""
+	var lowest:=100.0
+	for id in members:
+		var value:float=float(residents[id].health)
+		if value<lowest:
+			lowest=value
+			worst=str(id)
+	if not worst.is_empty() and lowest<100.0:
+		residents[worst].health=minf(100.0,lowest+12.0)
+
+
+func _household_shop(home:Dictionary)->Dictionary:
+	var result:Dictionary={"spent":0,"food":0,"goods":0}
+	var members:Array=_living_members(home)
+	if members.is_empty(): return result
+	var before:int=int(home.coins)
+	var need:int=2*members.size()-_food_units(home.inventory)
+	if need>0:
+		for item in _food_order(members):
+			if need<=0: break
+			var bought:int=_shop_purchase(home,str(item),need,true)
+			need-=bought
+			result.food+=bought
+	var sick:=false
+	var bookish:=false
+	var frugal:=false
+	for id in members:
+		if float(residents[id].health)<60.0: sick=true
+		if residents[id].traits.has("bookish"): bookish=true
+		if residents[id].traits.has("frugal"): frugal=true
+	if sick and int(home.inventory.get("remedy",0))>0:
+		home.inventory.remedy=int(home.inventory.remedy)-1
+		market.consumed.remedy=int(market.consumed.get("remedy",0))+1
+		_treat_sick(members)
+		sick=false
+	var pool:Array=[]
+	if sick:
+		pool.append({"item":"remedy","weight":50,"keep":false,"amount":1,"treat":true})
+		pool.append({"item":"tonic","weight":20,"keep":false,"amount":1,"treat":true})
+	if int(weather.season)>=2: pool.append({"item":"wood","weight":40,"keep":false,"amount":2,"treat":false})
+	if not frugal: pool.append({"item":"ale","weight":24,"keep":false,"amount":1,"treat":false})
+	if int(home.inventory.get("pottery",0))<=0: pool.append({"item":"pottery","weight":10,"keep":true,"amount":1,"treat":false})
+	if int(home.inventory.get("clothing",0))<=0: pool.append({"item":"clothing","weight":10,"keep":true,"amount":1,"treat":false})
+	if bookish and int(home.inventory.get("book",0))<=0: pool.append({"item":"book","weight":8,"keep":true,"amount":1,"treat":false})
+	var extras:=0
+	while extras<2 and not pool.is_empty():
+		var total:=0
+		for row in pool: total+=int(row.weight)
+		if total<=0: break
+		var roll:int=_rng.randi_range(1,total)
+		var index:=0
+		for i in pool.size():
+			roll-=int(pool[i].weight)
+			if roll<=0:
+				index=i
+				break
+		var choice:Dictionary=pool[index]
+		pool.remove_at(index)
+		if _shop_purchase(home,str(choice.item),int(choice.amount),bool(choice.keep))<=0: continue
+		extras+=1
+		result.goods+=1
+		if bool(choice.get("treat",false)):
+			_treat_sick(members)
+			for j in range(pool.size()-1,-1,-1):
+				if bool(pool[j].get("treat",false)): pool.remove_at(j)
+	result.spent=before-int(home.coins)
+	return result
+
+
+func _daily_household_demand()->void:
+	var spent:=0
+	var houses:=0
+	var food:=0
+	var goods:=0
+	for hid:String in households:
+		if hid=="house_player": continue
+		var summary:Dictionary=_household_shop(households[hid])
+		if int(summary.spent)<=0: continue
+		houses+=1
+		spent+=int(summary.spent)
+		food+=int(summary.food)
+		goods+=int(summary.goods)
+	_event("market","Дневные закупки семей",["Потрачено %d монет · хозяйств %d · еды %d · прочих товаров %d."%[spent,houses,food,goods]],[])
 
 
 func _home_owner(home:String)->String:
@@ -885,6 +1041,7 @@ func _new_day()->void:
 				if p.traits.has("family") and _rng.randf()<.15:
 					var due:float=clock+4320; p.family_plan_due=due; residents[partner].family_plan_due=due; home.last_family_day=_day
 					_schedule("birth",due,[id,partner],home.home_id,"Пополнение семьи"); break
+	_daily_household_demand()
 
 
 func _process_calendar()->void:
