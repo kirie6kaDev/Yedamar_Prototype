@@ -59,6 +59,11 @@ var _ui_scale := 1.0
 var _screen := Vector2(1280, 800)
 var _last_inventory_hash := -1
 var _last_craft_hash := -1
+## Contextual crafting: hand recipes are always listed; station recipes only for
+## the station the hero stands at ({"kind","id"} from main.gd, or an override set
+## when the window is opened from a station's context menu).
+var _craft_override: Dictionary = {}
+var _craft_hint: Label
 var _last_queue_key := ""
 var _last_slots_hash := -1
 var _journal_text := ""
@@ -515,6 +520,9 @@ func _build_crafting() -> void:
 	var list_scroll := _scroll(content, 350)
 	_craft_list = _vbox(list_scroll, 8)
 	_craft_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_craft_hint = _label(_craft_list, "", 18, MUTED)
+	_craft_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_craft_hint.custom_minimum_size = Vector2(340, 0)
 	var detail_scroll := _scroll(content)
 	detail_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_craft_detail = _vbox(detail_scroll, 13)
@@ -689,7 +697,7 @@ func update_state(state: Dictionary) -> void:
 	if inventory_key != _last_inventory_hash:
 		_last_inventory_hash = inventory_key
 		_refresh_inventory()
-	var craft_key := hash([_inventory,state.get("alchemy_learned",false),state.get("near_cauldron",false),state.get("near_stations",[]),_selected_role])
+	var craft_key := hash([_inventory,state.get("alchemy_learned",false),state.get("near_cauldron",false),state.get("near_stations",[]),_selected_role,craft_context(),_active_window=="craft"])
 	if craft_key != _last_craft_hash:
 		_last_craft_hash = craft_key
 		_refresh_recipes()
@@ -864,11 +872,32 @@ func _render_item_detail() -> void:
 		all_items.disabled=cart_missing
 
 
+## Station the crafting window is bound to: {"kind": station type or "", "id": object id}.
+func craft_context() -> Dictionary:
+	if not _craft_override.is_empty():
+		return _craft_override
+	return _state.get("craft_context", {"kind":"", "id":""})
+
+
+func _recipe_available_here(recipe: Dictionary) -> bool:
+	var station := str(recipe.get("station",""))
+	return station.is_empty() or station==str(craft_context().get("kind",""))
+
+
 func _refresh_recipes() -> void:
 	_clear(_craft_detail)
 	_recipe_rows.clear()
+	var context_kind := str(craft_context().get("kind",""))
+	if is_instance_valid(_craft_hint):
+		_craft_hint.text = "Здесь: в руках" + (" + " + str(STATIONS.get(context_kind, context_kind)) if not context_kind.is_empty() else "") + ".\nРецепты станков появляются, когда герой стоит у станка."
+	if not _selected_recipe.is_empty() and Campaign.RECIPES.has(_selected_recipe) and not _recipe_available_here(Campaign.RECIPES[_selected_recipe]):
+		_selected_recipe = ""
+	for recipe_id in Campaign.RECIPES:
+		_recipe_buttons[recipe_id].visible = _recipe_available_here(Campaign.RECIPES[recipe_id])
 	for recipe_id in Campaign.RECIPES:
 		var recipe: Dictionary = Campaign.RECIPES[recipe_id]
+		if not _recipe_available_here(recipe):
+			continue
 		var selected: bool = recipe_id==_selected_recipe
 		_recipe_buttons[recipe_id].add_theme_stylebox_override("normal",_style(Color("#243b31"),GOLD if selected else BORDER,6,10))
 		if not selected:
@@ -908,7 +937,7 @@ func _refresh_recipes() -> void:
 			allowed=false
 			reason="Сначала изучите алхимию у травницы."
 		if not station.is_empty():
-			_wrapped(_craft_detail,"Герой подойдёт к ближайшему месту работы.",20,MUTED)
+			_wrapped(_craft_detail,"Станок рядом: "+str(STATIONS.get(station,station))+".",20,GREEN)
 		var button := _button(_craft_detail,"В очередь",func():craft_requested.emit(recipe_id),Vector2(0,50),"craft")
 		button.disabled=not allowed
 		button.tooltip_text=reason
@@ -984,6 +1013,8 @@ func hide_context() -> void:
 
 func _open_window(which: String) -> void:
 	var map_was_open := _active_window=="map"
+	if which!="craft":
+		_craft_override = {}
 	_active_window=which
 	hide_context()
 	_inventory_window.visible=which=="inventory"
@@ -1041,6 +1072,13 @@ func _toggle_crafting() -> void:
 
 func show_crafting() -> void:
 	set_crafting_visible(true)
+
+
+## Open the crafting window bound to a specific station (campfire, cauldron...).
+func show_crafting_at(kind: String, target_id: String) -> void:
+	_craft_override = {"kind": kind, "id": target_id}
+	_open_window("craft")
+	_refresh_recipes()
 
 
 func set_crafting_visible(value: bool) -> void:

@@ -813,7 +813,7 @@ func _finish_action(action:String,id:String,role:String)->void:
 			hud.toast(actor.display_name+" отдохнул у огня.")
 		"cook","brew":
 			if role==active.role:
-				hud.show_crafting()
+				hud.show_crafting_at(str(obj.type),id)
 			else:
 				hud.toast(actor.display_name+" подошёл к месту ремесла. Выберите его для крафта.")
 		"hide":
@@ -864,9 +864,14 @@ func _craft(id:String,target_id:String="")->void:
 	if str(recipe.station)=="cauldron" and not person.alchemy_learned:
 		hud.toast("Сначала нужен урок травницы.")
 		return
-	if target_id.is_empty(): target_id=industry.find_station(id,active.position)
+	# Contextual crafting: station recipes run only at the station the hero is
+	# using (opened from it or standing next to it); no silent cross-map walk.
+	if target_id.is_empty() and not str(recipe.station).is_empty():
+		var context:Dictionary=hud.craft_context()
+		if str(context.get("kind",""))==str(recipe.station) and world.objects.has(str(context.get("id",""))):
+			target_id=str(context.id)
 	if not str(recipe.station).is_empty() and target_id.is_empty():
-		hud.toast("Сначала найдите или постройте подходящий станок.")
+		hud.toast("Этот рецепт делается у станка: "+str(hud.STATIONS.get(str(recipe.station),str(recipe.station)))+". Подойдите к нему.")
 		return
 	var order:Dictionary={"action":"craft:"+id,"id":target_id,"phase":"waiting","remaining":0.0}
 	if target_id.is_empty(): order.position=active.position
@@ -1032,6 +1037,22 @@ func _follow()->void:
 		if distance>7 and not follower.is_moving(): follower.navigate_to(leader.position+(follower.position-leader.position).normalized()*3)
 		elif distance<3: follower.stop_moving()
 
+
+const CRAFT_STATIONS:=["campfire","workbench","sawmill","smelter","anvil","cauldron"]
+
+## Nearest usable crafting station within arm's reach of the hero (for the C window).
+func _craft_context(from:Vector3)->Dictionary:
+	var best:=4.0
+	var found:={"kind":"","id":""}
+	for id in world.objects:
+		var obj:Dictionary=world.objects[id]
+		if not str(obj.type) in CRAFT_STATIONS: continue
+		if not is_instance_valid(obj.node) or not obj.node.visible: continue
+		var d:=_flat_distance(from,obj.get("approach",obj.position))
+		if d<best:
+			best=d
+			found={"kind":str(obj.type),"id":str(id)}
+	return found
 
 func _nearest_type(kind:String,from:Vector3,limit:float)->String:
 	var found:=""
@@ -1429,8 +1450,9 @@ func _update_ui(force_life:bool=true)->void:
 		"region":recent_region,"game_time":caravan.get_clock_text(),"night":caravan.is_night(),"stage":state.stage,
 		"animal":animal,"cart":{"mode":caravan.mode,"storage":caravan.storage.duplicate(true),"driver":"brother" if caravan.mode=="hand" else "animal","passengers":caravan.passengers.duplicate(),"available":true},
 		"save_slots":slot_cache,"alchemy_learned":state.flags.get("alchemy_learned",false),"near_cauldron":not _nearest_type("cauldron",active.position,2.5).is_empty(),
+		"craft_context":_craft_context(active.position),
 		"dialogue_more":not dialogue_queue.is_empty(),"journal_text":journal})
-	if life: life.update_ui()
+	if life: life.update_ui(force_life)
 
 func _show_map()->void:
 	var points:Array[Dictionary]=[]
