@@ -107,6 +107,20 @@ func queue_of(role: String) -> Array: return game.orders.get(role, [])
 
 func idle(role: String) -> bool: return queue_of(role).is_empty()
 
+## Life autonomy refills an empty queue, so "queue empty" is not a reliable
+## completion signal: track the exact order dictionary instead.
+func last_order(role: String, action: String, id: String = "") -> Variant:
+	var q: Array = queue_of(role)
+	for i in range(q.size() - 1, -1, -1):
+		if str(q[i].get("action", "")) == action and (id.is_empty() or str(q[i].get("id", "")) == id): return q[i]
+	return null
+
+func gone(role: String, ref: Variant) -> bool:
+	if ref == null: return true
+	for o in queue_of(role):
+		if is_same(o, ref): return false
+	return true
+
 func dismiss_dialogue() -> void:
 	for i in 12:
 		if game.current_dialogue.is_empty() and game.dialogue_queue.is_empty(): return
@@ -119,7 +133,8 @@ func do_action(role: String, action: String, id: String, max_frames: int = 3000)
 	var start: Vector3 = game._hero(role).position
 	var f0 := Engine.get_frames_drawn()
 	game._on_action(action, id)
-	var used := await until(func(): return idle(role), max_frames)
+	var ref = last_order(role, action, id)
+	var used := await until(func(): return gone(role, ref), max_frames)
 	dismiss_dialogue()
 	var target: Vector3 = game.world.objects[id].get("approach", game.world.objects[id].position) if game.world.objects.has(id) else start
 	return {"action": action, "id": id, "frames": used, "timeout": used < 0, "end_dist": snappedf(dist(game._hero(role).position, target), 0.01), "walked": snappedf(dist(start, game._hero(role).position), 0.1), "toasts": toasts.slice(t0)}
@@ -127,8 +142,9 @@ func do_action(role: String, action: String, id: String, max_frames: int = 3000)
 func walk_to(role: String, point: Vector3, max_frames: int = 3000) -> Dictionary:
 	select(role)
 	var t0 := toasts.size()
-	game._enqueue(role, {"action": "move", "position": point, "phase": "waiting"})
-	var used := await until(func(): return idle(role), max_frames)
+	var ref := {"action": "move", "position": point, "phase": "waiting"}
+	game._enqueue(role, ref)
+	var used := await until(func(): return gone(role, ref), max_frames)
 	return {"frames": used, "timeout": used < 0, "end_dist": snappedf(dist(game._hero(role).position, point), 0.01), "toasts": toasts.slice(t0)}
 
 func teleport(role: String, p: Vector3) -> void:
@@ -290,7 +306,8 @@ func _phase_campaign() -> Dictionary:
 		issue("campaign", "not enough stone/branch after gathering", inv.duplicate())
 		give(role, {"stone": 3, "branch": 2})
 	game._craft("stone_pickaxe")
-	var used := await until(func(): return idle(role), 3000)
+	var cref = last_order(role, "craft:stone_pickaxe")
+	var used := await until(func(): return gone(role, cref), 3000)
 	rec.call("craft stone_pickaxe (hand)", {"frames": used, "timeout": used < 0, "pickaxe": int(inv.get("pickaxe", 0)), "toasts": toasts.slice(-3)})
 	rec.call("talk herbalist", await do_action(role, "talk", "herbalist"))
 	var cauldron: String = game._nearest_type("cauldron", brother().position, 5000)
@@ -299,7 +316,8 @@ func _phase_campaign() -> Dictionary:
 		var r := await do_action(role, "brew", cauldron)
 		rec.call("brew->open crafting at cauldron", r)
 		game._craft("healing_potion", cauldron)
-		used = await until(func(): return idle(role), 3000)
+		var pref = last_order(role, "craft:healing_potion")
+		used = await until(func(): return gone(role, pref), 3000)
 		rec.call("craft healing_potion", {"frames": used, "timeout": used < 0, "potion": int(inv.get("healing_potion", 0)), "toasts": toasts.slice(-3)})
 	rec.call("talk courier", await do_action(role, "talk", "courier"))
 	if int(inv.get("branch", 0)) < 3:
@@ -375,7 +393,8 @@ func _phase_crafting() -> Dictionary:
 			game._on_action("craft:" + rid, target)
 		else:
 			game._craft(rid)
-		var used := await until(func(): return idle(role), 4000)
+		var oref = last_order(role, "craft:" + rid)
+		var used := await until(func(): return gone(role, oref), 4000)
 		var after := int(inv.get(r.item, 0))
 		var row := {"station": station, "station_id": target, "station_dist_m": snappedf(dist(start, game.world.objects[target].position), 1) if not target.is_empty() else 0, "frames": used, "ok": after > before, "toasts": toasts.slice(t0)}
 		results[rid] = row
@@ -562,6 +581,7 @@ func _phase_ui() -> Dictionary:
 
 func _phase_save_load() -> Dictionary:
 	var res := {}
+	game._clear_orders()
 	var t := Time.get_ticks_usec()
 	game._save_slot("manual_1")
 	res.save_ms = snappedf((Time.get_ticks_usec() - t) / 1000.0, 0.1)
@@ -582,6 +602,11 @@ func _phase_save_load() -> Dictionary:
 	res.load_ms = snappedf((Time.get_ticks_usec() - t) / 1000.0, 0.1)
 	await frames(5)
 	res.inventory_restored = game._inventory("brother").hash() == inv_before.hash()
+	var diff := {}
+	var now_inv: Dictionary = game._inventory("brother")
+	for k in now_inv.keys() + inv_before.keys():
+		if int(now_inv.get(k, 0)) != int(inv_before.get(k, 0)): diff[k] = [inv_before.get(k, 0), now_inv.get(k, 0)]
+	res.inventory_diff = diff
 	res.position_restored = dist(brother().position, pos_before) < 0.5
 	if not res.inventory_restored or not res.position_restored: issue("save", "save/load roundtrip mismatch", res)
 	return res

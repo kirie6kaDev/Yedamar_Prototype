@@ -428,6 +428,17 @@ func _on_action(action:String,id:String)->void:
 	_enqueue(active.role,{"action":action,"id":id,"phase":"waiting","remaining":0.0})
 
 func _enqueue(role:String,order:Dictionary)->void:
+	# A player command pre-empts autonomous/workday orders. Before, autonomy
+	# filled the empty queue and the player's action waited behind e.g. a walk
+	# to the tavern, so the hero "ignored" commands. Autonomy/workday planning
+	# refill the queue again once it is empty.
+	if not bool(order.get("automatic",false)):
+		var queue:Array=orders[role]
+		if not queue.is_empty() and bool(queue[0].get("automatic",false)):
+			_end_job(role)
+			_hero(role).stop_moving()
+		for i in range(queue.size()-1,-1,-1):
+			if bool(queue[i].get("automatic",false)): queue.remove_at(i)
 	if orders[role].size()>=12:
 		hud.toast("В очереди уже 12 действий.")
 		return
