@@ -24,10 +24,16 @@ func _initialize() -> void:
 	_wipe_saves()
 	var t0 := Time.get_ticks_msec()
 	game = load("res://main.tscn").instantiate()
-	root.add_child(game)
+	root.add_child.call_deferred(game)
+	_boot.call_deferred(t0)
+
+func _boot(t0: int) -> void:
+	for i in 600:
+		if game.is_node_ready() and game.hud != null: break
+		await process_frame
 	report.boot_ms = Time.get_ticks_msec() - t0
 	game.hud._toast_box.child_entered_tree.connect(_on_toast)
-	_run.call_deferred()
+	_run()
 
 func _wipe_saves() -> void:
 	var dir := DirAccess.open("user://saves")
@@ -139,7 +145,7 @@ func _run() -> void:
 		types[t] = int(types.get(t, 0)) + 1
 	report.object_types = types
 	dismiss_dialogue()
-	var phase_list := [["idle_perf", _phase_idle_perf], ["nav_static", _phase_nav_static], ["campaign", _phase_campaign], ["crafting", _phase_crafting], ["queue_edges", _phase_queue_edges], ["actions", _phase_actions], ["life", _phase_life], ["ui", _phase_ui], ["save_load", _phase_save_load], ["walk_sample", _phase_walk_sample], ["long_run", _phase_long_run]]
+	var phase_list := [["profile", _phase_profile], ["idle_perf", _phase_idle_perf], ["nav_static", _phase_nav_static], ["campaign", _phase_campaign], ["crafting", _phase_crafting], ["queue_edges", _phase_queue_edges], ["actions", _phase_actions], ["life", _phase_life], ["ui", _phase_ui], ["save_load", _phase_save_load], ["walk_sample", _phase_walk_sample], ["long_run", _phase_long_run]]
 	for entry in phase_list:
 		if not want(entry[0]): continue
 		L("=== PHASE " + entry[0])
@@ -171,6 +177,44 @@ func _phase_idle_perf() -> Dictionary:
 	Engine.time_scale = 1.0
 	await frames(300)
 	return {"note": "300 frames at 1x, headless (no GPU): CPU-side frame cost only"}
+
+## Per-subsystem cost: call each tick/update directly and time it (approximate profiler).
+func _phase_profile() -> Dictionary:
+	var g = game
+	var probes := {
+		"main._update_ui": func(): g._update_ui(),
+		"main._needs": func(): g._needs(0.033),
+		"main._update_hover": func(): g._update_hover(),
+		"main._follow": func(): g._follow(),
+		"main._plan_workdays": func(): g._plan_workdays(),
+		"main._advance": func(): g._advance(),
+		"main._snapshot": func(): g._snapshot(),
+		"main._save_slot(realtime)": func(): g._save_slot("realtime", false),
+		"saves.list_slots": func(): g.saves.list_slots(),
+		"life.tick(0.033)": func(): g.life.tick(0.033),
+		"life.sim.advance(0.5)": func(): g.life.sim.advance(0.5),
+		"life._update_population": func(): g.life._update_population(),
+		"life._autonomy": func(): g.life._autonomy(),
+		"life.update_ui": func(): g.life.update_ui(),
+		"v5.tick(0.033)": func(): g.v5.tick(0.033),
+		"v5.domestic.tick": func(): g.v5.domestic.tick(0.033),
+		"v5.civic.advance": func(): g.v5.civic.advance(0.033),
+		"settlement.tick": func(): g.settlement.tick(0.033),
+		"ranch.tick": func(): g.ranch.tick(0.033),
+		"city._update_roofs": func(): g.city._update_roofs(),
+		"craft_context": func(): g._craft_context(g.active.position) if g.has_method("_craft_context") else null,
+	}
+	var res := {}
+	for name in probes:
+		var times := []
+		for i in 15:
+			var t := Time.get_ticks_usec()
+			probes[name].call()
+			times.append(Time.get_ticks_usec() - t)
+		times.sort()
+		res[name] = {"median_ms": snappedf(times[7] / 1000.0, 0.01), "max_ms": snappedf(times[-1] / 1000.0, 0.01)}
+		L("  profile %-28s median=%6.2f ms max=%6.2f ms" % [name, times[7] / 1000.0, times[-1] / 1000.0])
+	return res
 
 ## Static reachability: path from the farm start to every interactable's approach point,
 ## then replay the path with the actor's own step rule to find segments the actor would refuse.
@@ -324,16 +368,30 @@ func _phase_crafting() -> Dictionary:
 		var station := str(r.station)
 		var target: String = game.industry.find_station(rid, start) if not station.is_empty() else ""
 		var t0 := toasts.size()
-		game._craft(rid)
+		if station.is_empty() or target.is_empty():
+			game._craft(rid)
+		elif game.hud.has_method("show_crafting_at"):
+			# contextual crafting (fixed branch): choose the recipe at the station itself
+			game._on_action("craft:" + rid, target)
+		else:
+			game._craft(rid)
 		var used := await until(func(): return idle(role), 4000)
 		var after := int(inv.get(r.item, 0))
 		var row := {"station": station, "station_id": target, "station_dist_m": snappedf(dist(start, game.world.objects[target].position), 1) if not target.is_empty() else 0, "frames": used, "ok": after > before, "toasts": toasts.slice(t0)}
 		results[rid] = row
 		if after <= before: issue("crafting", "recipe %s did not produce %s" % [rid, r.item], row)
+	# context rule: a station recipe requested far from any station
+	teleport(role, game._ground(game.FARM_START))
+	game.hud.dismiss_all()
+	var tq := toasts.size()
+	game._craft("smelt_iron")
+	await frames(3)
+	var far_request := {"queued": not idle(role), "toasts": toasts.slice(tq)}
+	game._clear_orders()
 	var hand := []
 	for rid in Campaign.RECIPES: if str(Campaign.RECIPES[rid].station).is_empty(): hand.append(rid)
 	Engine.time_scale = 1.0
-	return {"recipes": results, "hand_recipes": hand, "note": "C window lists every recipe regardless of location; _craft auto-walks to the nearest station of the needed type anywhere on the map"}
+	return {"recipes": results, "hand_recipes": hand, "station_recipe_far_from_station": far_request, "note": "C window lists every recipe regardless of location; _craft auto-walks to the nearest station of the needed type anywhere on the map"}
 
 func _phase_queue_edges() -> Dictionary:
 	Engine.time_scale = 4.0
@@ -582,8 +640,11 @@ func _phase_long_run() -> Dictionary:
 						stuck[id] = int(stuck.get(id, 0)) + 1
 				last[id] = p
 			samples.append({"frame": k, "game_time": game.caravan.get_clock_text(), "citizens": game.life.citizens.size(), "moving": moving, "nav_calls": game.navigation.stats_calls if "stats_calls" in game.navigation else -1})
+	var blocked_total := 0
+	for rid in game.life.sim.residents:
+		blocked_total += game.life.sim.residents[rid].get("blocked", {}).size()
 	var chronic := []
 	for id in stuck: if stuck[id] >= 3: chronic.append({"id": id, "samples_stuck": stuck[id]})
 	if not chronic.is_empty(): issue("nav", "%d citizens repeatedly idle far from their walking target (stuck)" % chronic.size(), chronic.slice(0, 10))
 	Engine.time_scale = 1.0
-	return {"days_requested": long_days, "frames": frames_needed, "day_start": day0, "day_end": int(game.caravan.day_number), "samples": samples, "stuck": chronic, "toast_count": toasts.size() - t0, "brother_needs": {"hunger": game.state.characters.brother.hunger, "thirst": game.state.characters.brother.thirst, "sleep": game.state.characters.brother.sleep, "health": game.brother.health}}
+	return {"days_requested": long_days, "frames": frames_needed, "day_start": day0, "day_end": int(game.caravan.day_number), "samples": samples, "stuck": chronic, "resident_blocked_venues": blocked_total, "toast_count": toasts.size() - t0, "brother_needs": {"hunger": game.state.characters.brother.hunger, "thirst": game.state.characters.brother.thirst, "sleep": game.state.characters.brother.sleep, "health": game.brother.health}}
