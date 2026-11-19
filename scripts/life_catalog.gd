@@ -56,7 +56,18 @@ const GOODS := {
 	"remedy":{"name":"Лекарственные сборы","price":8,"stock":60},"tonic":{"name":"Травяной настой","price":9,"stock":50},"research_notes":{"name":"Исследовательские записи","price":8,"stock":40},
 	"ward_charm":{"name":"Защитные изделия","price":12,"stock":30},"map":{"name":"Карты дорог","price":12,"stock":40},"artwork":{"name":"Резные и рисованные работы","price":14,"stock":25},
 	"seeds_carrot":{"name":"Семена моркови","price":2,"stock":80},"seeds_herb":{"name":"Семена трав","price":3,"stock":60},"apple_sapling":{"name":"Саженец яблони","price":10,"stock":30},
-	"hoe":{"name":"Мотыга","price":12,"stock":25},"axe":{"name":"Топор","price":16,"stock":25},"saw":{"name":"Пила","price":20,"stock":20},"water":{"name":"Фляга воды","price":1,"stock":400}
+	"hoe":{"name":"Мотыга","price":12,"stock":25},"axe":{"name":"Топор","price":16,"stock":25},"saw":{"name":"Пила","price":20,"stock":20},"water":{"name":"Фляга воды","price":1,"stock":400},
+	# Hero gathering/crafting items (campaign.gd ITEMS). Price ≈ recipe inputs + labour; stock 0 so the
+	# market only resells what players sold (no early shortcut to gear); "target" drives live price/export.
+	# parcel (Посылка Марты) is a quest item and deliberately has no price.
+	"branch":{"name":"Ветки","price":1,"stock":0,"target":60},"berry":{"name":"Ягоды","price":2,"stock":0,"target":40,"food":15},
+	"mint":{"name":"Мята","price":2,"stock":0,"target":30},"lavender":{"name":"Лаванда","price":2,"stock":0,"target":30},
+	"bandage":{"name":"Повязки","price":8,"stock":0,"target":20},"ration":{"name":"Дорожная еда","price":9,"stock":0,"target":20,"food":45},
+	"healing_potion":{"name":"Лечебное зелье","price":18,"stock":0,"target":10},"stamina_potion":{"name":"Зелье бодрости","price":16,"stock":0,"target":10},
+	"pickaxe":{"name":"Каменная кирка","price":12,"stock":0,"target":6},"sword":{"name":"Деревянный меч","price":10,"stock":0,"target":6},
+	"iron_blank":{"name":"Кованая заготовка","price":12,"stock":0,"target":10},"iron_sword":{"name":"Железный меч","price":45,"stock":0,"target":4},
+	"iron_armor":{"name":"Железный доспех","price":60,"stock":0,"target":3},"bow":{"name":"Охотничий лук","price":22,"stock":0,"target":4},
+	"arrow":{"name":"Стрелы","price":1,"stock":0,"target":60}
 }
 const ACTIONS := {
 	"eat":{"name":"Поесть","duration":20.0,"animation":"interact"},"drink":{"name":"Попить","duration":8.0,"animation":"interact"},

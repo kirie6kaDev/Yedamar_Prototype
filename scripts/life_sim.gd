@@ -2,6 +2,27 @@ extends RefCounted
 ## Authoritative, scene-independent life simulation. Every resident has one persistent record.
 const Catalog = preload("res://scripts/life_catalog.gd")
 const Population = preload("res://scripts/life_population.gd")
+const SNAPSHOT_VERSION:=2
+# Economy step 3: live prices, a fair that also exports surplus, finite treasury.
+const PRICE_MIN:=0.5 # buy multiplier floor relative to Catalog base price
+const PRICE_MAX:=2.5 # buy multiplier ceiling
+const STOCK_ELASTICITY:=0.6 # (target/stock)^0.6: stock at half target costs ×1.52
+const FLOW_WEIGHT:=0.25 # recent net buying/selling moves price by at most ±25 %
+const FLOW_DECAY:=0.75 # remembered net volume shrinks every day, prices drift back
+const SELL_SPREAD:=0.65 # households sell to the market at 65 % of the buy price
+const SELL_MAX_MULT:=1.3 # selling never pays more than 0.65×1.3≈0.85 of base price
+const TREASURY_PAYROLL_DAYS:=14 # starting treasury = two weeks (two fairs) of full payroll
+const TREASURY_LEGACY_LIMIT:=200000 # v1 saves carried 1 000 000; anything above is legacy
+const WAGE_FLOOR_SHARE:=0.25 # below 25 % of base treasury wages shrink linearly…
+const WAGE_MIN_FACTOR:=0.3 # …but never under 30 % while the treasury can pay at all
+const LEVY_FREE:=200 # NPC households keep 200 coins untaxed
+const LEVY_RATE:=0.04 # daily hearth levy on savings above LEVY_FREE (NPC households only)
+const EXPORT_ABOVE:=2.0 # fair exports stock above 2× target…
+const EXPORT_KEEP:=1.5 # …down to 1.5× target
+const EXPORT_PRICE:=0.5 # caravan pays half of base price for surplus
+const CARAVAN_PURSE_SHARE:=0.2 # caravan spends at most 20 % of base treasury per fair
+const UPKEEP_RATE:=0.03 # daily public upkeep: 3 % of treasury above its base
+const LUXURY_BUDGET:=250 # households with this much spare money also buy luxuries
 
 var residents:Dictionary={}
 var households:Dictionary={}
@@ -53,7 +74,7 @@ func configure(config:Dictionary)->void:
 	var population:Dictionary=Population.create(venues,int(config.get("seed",782941)))
 	residents=population.residents
 	households=population.households
-	market={"stocks":{},"treasury":1000000,"turnover":0,"production":{},"consumed":{},"services":{"community":0.0,"education":0.0,"safety":65.0,"culture":0.0}}
+	market={"stocks":{},"treasury":0,"turnover":0,"production":{},"consumed":{},"services":{"community":0.0,"education":0.0,"safety":65.0,"culture":0.0},"flow":{},"ledger":_empty_ledger(),"treasury_base":0}
 	for item:String in Catalog.GOODS: market.stocks[item]=int(Catalog.GOODS[item].stock)
 	for profession:String in professions:
 		var venue:String=str(professions[profession].venue_id)
@@ -62,6 +83,7 @@ func configure(config:Dictionary)->void:
 		residents[id].workplace_id=_workplace(str(residents[id].profession))
 		residents[id]["death_age"]=82.0+_rng.randf()*10
 		residents[id]["married"]=not str(residents[id].partner_id).is_empty()
+	market.treasury_base=_treasury_base(); market.treasury=int(market.treasury_base)
 	_refresh_weather()
 	_schedule("fair",clock+1440,[],"life_market","Городская ярмарка")
 	_event("settlement","Арденхольм просыпается",["48 жителей ведут хозяйство, учатся и работают независимо от камеры."],[])
@@ -420,6 +442,7 @@ func _execute(id:String,action:String,payload:Dictionary)->Dictionary:
 				var cost:int=price(food)
 				home.coins=int(home.coins)-cost; home.expenses=int(home.expenses)+cost
 				market.treasury=int(market.treasury)+cost; market.stocks[food]=int(market.stocks[food])-1
+				_record_trade(food,1,cost)
 			market.consumed[food]=int(market.consumed.get(food,0))+1
 			_change_need(id,"hunger",float(Catalog.GOODS[food].get("food",35)))
 			_moodlet(id,"well_fed","Сытный обед",12,180,"food")
@@ -451,12 +474,15 @@ func _execute(id:String,action:String,payload:Dictionary)->Dictionary:
 			if int(p.get("last_wage_day",-1))!=_day:
 				p.last_wage_day=_day
 				p.paid_minutes_today=0
-			var payable:bool=int(p.get("paid_minutes_today",0))<480
+			# Hours 1–8 pay in full, hours 9–10 are overtime at half rate, later hours are
+			# unpaid volunteering (goods still reach the market). Wages shrink when the treasury is low.
+			var paid_minutes:int=int(p.get("paid_minutes_today",0))
+			var rate:float=1.0 if paid_minutes<480 else (.5 if paid_minutes<600 else 0.0)
 			var wage:int=0
-			if payable:
-				wage=maxi(1,roundi(float(job.wage)/8.0*multiplier*(1+.08*(int(p.career.level)-1))))
-				p.paid_minutes_today=int(p.get("paid_minutes_today",0))+60
-			if wage>0 and int(market.treasury)<wage: return {"ok":false,"message":"Работодатель временно не может оплатить смену."}
+			if rate>0:
+				wage=maxi(1,roundi(float(job.wage)/8.0*rate*multiplier*(1+.08*(int(p.career.level)-1))*_wage_factor()))
+			if wage>0 and int(market.treasury)<wage: return {"ok":false,"message":"Работодатель временно не может оплатить смену: городская казна пуста."}
+			p.paid_minutes_today=paid_minutes+60
 			for item:String in job.inputs: market.stocks[item]=int(market.stocks[item])-int(job.inputs[item])
 			for item:String in job.outputs:
 				var amount:int=maxi(1,roundi(int(job.outputs[item])*multiplier))
@@ -464,6 +490,7 @@ func _execute(id:String,action:String,payload:Dictionary)->Dictionary:
 			if not str(job.service).is_empty(): market.services[job.service]=minf(100,float(market.services.get(job.service,0))+multiplier)
 			if wage>0:
 				market.treasury=int(market.treasury)-wage; home.coins=int(home.coins)+wage; home.income=int(home.income)+wage
+				_ledger_add("wages",wage)
 				p.lifetime_wages=int(p.lifetime_wages)+wage
 			_business_profit(p,job,wage,multiplier)
 			p.career.work_minutes=float(p.career.work_minutes)+60; p.career.earned=int(p.career.earned)+wage
@@ -471,8 +498,9 @@ func _execute(id:String,action:String,payload:Dictionary)->Dictionary:
 			var level:int=mini(10,1+floori(float(p.career.work_minutes)/1200))
 			if level>int(p.career.level): p.career.level=level; _remember(id,"promotion","Повышение",[job.name+" · ступень "+str(level)]); _event("promotion",p.name+" получил повышение",[job.name], [id])
 			_skill(id,str(job.skill),10); _change_need(id,"energy",-4); _change_need(id,"hygiene",-4)
-			if wage>0: message="Рабочий час завершён. Семья получила %d монет."%wage
-			else: message="Рабочий час завершён. Оплата за сегодня уже выдана за 8 часов."
+			if wage>0 and rate<1.0: message="Сверхурочный час (×0,5). Семья получила %d монет."%wage
+			elif wage>0: message="Рабочий час завершён. Семья получила %d монет."%wage
+			else: message="Рабочий час завершён. Оплата за сегодня уже выдана (8 часов и 2 сверхурочных)."
 			extra={"wage":wage,"skill":job.skill}
 		"apply_job":
 			for business:Dictionary in businesses.values(): business.employees.erase(id)
@@ -485,9 +513,11 @@ func _execute(id:String,action:String,payload:Dictionary)->Dictionary:
 			var item:String=str(payload.item_id); var amount:int=int(payload.get("quantity",1)); var cost:int=price(item,action=="sell")*amount
 			if action=="buy":
 				home.coins=int(home.coins)-cost; home.expenses=int(home.expenses)+cost; inv[item]=int(inv.get(item,0))+amount; market.stocks[item]=int(market.stocks[item])-amount; market.treasury=int(market.treasury)+cost
+				_record_trade(item,amount,cost)
 			else:
 				home.coins=int(home.coins)+cost; home.income=int(home.income)+cost; inv[item]=int(inv[item])-amount; market.stocks[item]=int(market.stocks.get(item,0))+amount; market.treasury=int(market.treasury)-cost
-			market.turnover=int(market.turnover)+cost; _skill(id,"trade",2*amount); message=("Куплено: " if action=="buy" else "Продано: ")+Catalog.GOODS[item].name+" ×"+str(amount)
+				_record_trade(item,-amount,cost)
+			_skill(id,"trade",2*amount); message=("Куплено: " if action=="buy" else "Продано: ")+Catalog.GOODS[item].name+" ×"+str(amount)
 		"buy_home":
 			var house_id:String=str(payload.home_id); var cost:int=int(venues[house_id].get("price",200))
 			home.coins=int(home.coins)-cost; market.treasury=int(market.treasury)+cost; home.properties.append(house_id)
@@ -542,13 +572,15 @@ func _business_profit(p:Dictionary,job:Dictionary,wage:int,multiplier:float)->vo
 	if business.is_empty() or str(business.owner).is_empty() or not households.has(str(business.owner)): return
 	if not business.employees.has(p.id): business.employees.append(p.id)
 	var revenue:int=0; var inputs:int=0
-	for item:String in job.outputs: revenue+=maxi(1,roundi(int(job.outputs[item])*multiplier))*int(Catalog.GOODS[item].price)
-	for item:String in job.inputs: inputs+=int(job.inputs[item])*int(Catalog.GOODS[item].price)
+	# Enterprise revenue follows live market prices, so markup and scarcity both matter.
+	for item:String in job.outputs: revenue+=maxi(1,roundi(int(job.outputs[item])*multiplier))*price(item)
+	for item:String in job.inputs: inputs+=int(job.inputs[item])*price(item)
 	if not str(job.service).is_empty(): revenue=wage+3
 	# High asking prices reduce sales volume; stock remains in the shared local market.
 	var margin:float=float(business.markup)
 	var demand:float=clampf(1.35-(margin-1)*1.5,.45,1.0)
-	var profit:int=mini(int(market.treasury),maxi(0,roundi(revenue*margin*demand)-inputs-wage))
+	var cushion:int=int(int(market.get("treasury_base",0))*.1)
+	var profit:int=mini(maxi(0,int(market.treasury)-cushion),maxi(0,roundi(revenue*margin*demand)-inputs-wage))
 	var owner:Dictionary=households[business.owner]
 	market.treasury=int(market.treasury)-profit; owner.coins=int(owner.coins)+profit; owner.income=int(owner.income)+profit; business.profits=int(business.profits)+profit
 
@@ -561,9 +593,58 @@ func _cook_recipe(inv:Dictionary)->Dictionary:
 
 func price(item:String,selling:bool=false)->int:
 	if not Catalog.GOODS.has(item): return 0
-	var good:Dictionary=Catalog.GOODS[item]
-	var scarcity:float=clampf(float(good.stock)/maxf(1,float(market.stocks.get(item,0))),.7,2.0)
-	return maxi(1,roundi(float(good.price)*(.7+.3*scarcity)*(.65 if selling else 1.0)))
+	var base:float=float(Catalog.GOODS[item].price)
+	var multiplier:float=price_multiplier(item)
+	if not selling: return maxi(1,roundi(base*multiplier))
+	var buy:int=maxi(1,roundi(base*multiplier))
+	var sell:int=maxi(1,roundi(base*minf(multiplier,SELL_MAX_MULT)*SELL_SPREAD))
+	return mini(sell,maxi(1,buy-1)) if buy>1 else 1
+
+
+## Live multiplier of the base price: stock against its target plus recent net trade volume.
+func price_multiplier(item:String)->float:
+	var target:int=_stock_target(item)
+	var stock_factor:float=1.0
+	if target>0: stock_factor=clampf(pow(float(target)/maxf(1.0,float(market.stocks.get(item,0))),STOCK_ELASTICITY),.55,2.2)
+	var flow:float=float(market.get("flow",{}).get(item,0.0))
+	var flow_factor:float=1.0+FLOW_WEIGHT*tanh(flow/maxf(5.0,float(target)*.15))
+	return clampf(stock_factor*flow_factor,PRICE_MIN,PRICE_MAX)
+
+
+func _stock_target(item:String)->int:
+	var good:Dictionary=Catalog.GOODS.get(item,{})
+	return int(good.get("target",good.get("stock",0)))
+
+
+## Positive amount: households bought from the market; negative: they sold to it.
+func _record_trade(item:String,amount:int,cost:int)->void:
+	if not market.has("flow"): market.flow={}
+	market.flow[item]=float(market.flow.get(item,0.0))+amount
+	market.turnover=int(market.turnover)+cost
+	_ledger_add("sales" if amount>0 else "buybacks",cost)
+
+
+func _ledger_add(key:String,amount:int)->void:
+	if not market.get("ledger") is Dictionary: market.ledger=_empty_ledger()
+	market.ledger[key]=int(market.ledger.get(key,0))+amount
+
+
+func _empty_ledger()->Dictionary:
+	return {"wages":0,"sales":0,"buybacks":0,"levy":0,"exports":0,"imports":0,"upkeep":0,"relief":0}
+
+
+## Starting/finite treasury: two weeks of the full payroll of everyone employed.
+func _treasury_base()->int:
+	var payroll:int=0
+	for p:Dictionary in residents.values():
+		if bool(p.get("alive",true)) and professions.has(str(p.get("profession",""))): payroll+=int(professions[p.profession].wage)
+	return maxi(5000,roundi(float(payroll*TREASURY_PAYROLL_DAYS)/500.0)*500)
+
+
+## 1.0 while the treasury holds ≥25 % of its base; then linearly down to 0.3.
+func _wage_factor()->float:
+	var base:float=maxf(1.0,float(market.get("treasury_base",1)))
+	return clampf(WAGE_MIN_FACTOR+(1.0-WAGE_MIN_FACTOR)*float(market.treasury)/(base*WAGE_FLOOR_SHARE),WAGE_MIN_FACTOR,1.0)
 
 
 func _food_item(p:Dictionary)->String:
@@ -572,7 +653,11 @@ func _food_item(p:Dictionary)->String:
 	var house:Dictionary=households[p.household_id]
 	for item:String in choices:
 		if Catalog.GOODS.has(item) and (int(p.inventory.get(item,0))>0 or int(house.inventory.get(item,0))>0): return item
-	for item:String in ["bread","carrot","apple","meal"]:
+	var options:Array=["bread","carrot","apple","meal"]
+	# NPC households that are already below their savings reserve buy the cheapest food.
+	if not bool(p.get("external",false)) and _shop_budget(house,_living_members(house))<=0:
+		options.sort_custom(func(a,b): return price(a)<price(b))
+	for item:String in options:
 		if int(market.stocks.get(item,0))>0 and int(house.coins)>=price(item): return item
 	return ""
 
@@ -614,7 +699,7 @@ func _shop_purchase(home:Dictionary,item:String,want:int,store:bool)->int:
 	home.expenses=int(home.expenses)+cost
 	market.treasury=int(market.treasury)+cost
 	market.stocks[item]=int(market.stocks[item])-affordable
-	market.turnover=int(market.turnover)+cost
+	_record_trade(item,affordable,cost)
 	if store:
 		home.inventory[item]=int(home.inventory.get(item,0))+affordable
 	else:
@@ -630,8 +715,11 @@ func _food_order(members:Array)->Array:
 		if residents[id].traits.has("frugal"): frugal=true
 		if favorite.is_empty() and float(residents[id].age_years)>=13:
 			favorite=str(residents[id].preferences.get("food",""))
-	if frugal: return ["bread","carrot","apple","milk"]
-	if Catalog.GOODS.has(favorite) and Catalog.GOODS[favorite].has("food"):
+	if frugal: order=["bread","carrot","apple","milk"]
+	# Live prices steer demand: cheapest satiety per coin first, so a bread shortage
+	# (price ×2.5) moves families to fish, meal or carrots instead of draining their savings.
+	order.sort_custom(func(a,b): return float(price(a))/float(Catalog.GOODS[a].food)<float(price(b))/float(Catalog.GOODS[b].food))
+	if not frugal and Catalog.GOODS.has(favorite) and Catalog.GOODS[favorite].has("food") and price(favorite)<=roundi(float(Catalog.GOODS[favorite].price)*1.5):
 		order.erase(favorite)
 		order.push_front(favorite)
 	return order
@@ -682,8 +770,16 @@ func _household_shop(home:Dictionary)->Dictionary:
 	if int(home.inventory.get("pottery",0))<=0: pool.append({"item":"pottery","weight":10,"keep":true,"amount":1,"treat":false})
 	if int(home.inventory.get("clothing",0))<=0: pool.append({"item":"clothing","weight":10,"keep":true,"amount":1,"treat":false})
 	if bookish and int(home.inventory.get("book",0))<=0: pool.append({"item":"book","weight":8,"keep":true,"amount":1,"treat":false})
+	# Wealthier households spend more: luxuries and a third purchase recycle savings into the treasury.
+	var max_extras:=2
+	if _shop_budget(home,members)>=LUXURY_BUDGET:
+		max_extras=3
+		pool.append({"item":"jewelry","weight":10,"keep":false,"amount":1,"treat":false})
+		pool.append({"item":"artwork","weight":10,"keep":false,"amount":1,"treat":false})
+		pool.append({"item":"meat","weight":12,"keep":false,"amount":2,"treat":false})
+		if not frugal: pool.append({"item":"ale","weight":12,"keep":false,"amount":2,"treat":false})
 	var extras:=0
-	while extras<2 and not pool.is_empty():
+	while extras<max_extras and not pool.is_empty():
 		var total:=0
 		for row in pool: total+=int(row.weight)
 		if total<=0: break
@@ -1042,6 +1138,51 @@ func _new_day()->void:
 					var due:float=clock+4320; p.family_plan_due=due; residents[partner].family_plan_due=due; home.last_family_day=_day
 					_schedule("birth",due,[id,partner],home.home_id,"Пополнение семьи"); break
 	_daily_household_demand()
+	_daily_market_upkeep()
+
+
+## Prices drift back to base as remembered volume fades; NPC savings pay a hearth levy.
+func _daily_market_upkeep()->void:
+	var flow:Dictionary=market.get("flow",{})
+	for item:String in flow.keys():
+		flow[item]=float(flow[item])*FLOW_DECAY
+		if absf(float(flow[item]))<.05: flow.erase(item)
+	market.flow=flow
+	var levy:=0
+	for hid:String in households:
+		if hid=="house_player": continue
+		var home:Dictionary=households[hid]
+		var due:int=floori(maxf(0.0,float(int(home.coins)-LEVY_FREE))*LEVY_RATE)
+		if due<=0: continue
+		home.coins=int(home.coins)-due; home.expenses=int(home.expenses)+due; levy+=due
+	market.treasury=int(market.treasury)+levy
+	_ledger_add("levy",levy)
+	# Poor relief: a penniless NPC family with an empty pantry gets one portion of the
+	# cheapest staple per member from town stock, so a finite economy never starves anyone.
+	var relief:=0
+	for hid:String in households:
+		if hid=="house_player": continue
+		var home:Dictionary=households[hid]; var members:Array=_living_members(home)
+		if members.is_empty() or _food_units(home.inventory)>=members.size(): continue
+		var staple:String=""
+		for item:String in ["bread","carrot","apple","meal","fish"]:
+			if int(market.stocks.get(item,0))>=members.size() and (staple.is_empty() or price(item)<price(staple)): staple=item
+		if staple.is_empty() or int(home.coins)>=price(staple)*members.size(): continue
+		market.stocks[staple]=int(market.stocks[staple])-members.size()
+		home.inventory[staple]=int(home.inventory.get(staple,0))+members.size(); relief+=members.size()
+	if relief>0: _ledger_add("relief",relief)
+	# A treasury above its base funds public upkeep (watch, festivals, school): a money sink
+	# that keeps exports from piling up coins forever and turns them into services.
+	var excess:int=int(market.treasury)-int(market.get("treasury_base",0))
+	var upkeep:int=floori(maxf(0.0,float(excess))*UPKEEP_RATE)
+	if upkeep>0:
+		market.treasury=int(market.treasury)-upkeep; _ledger_add("upkeep",upkeep)
+		var boost:float=float(upkeep)/50.0
+		for service:String in ["safety","community","culture","education"]:
+			market.services[service]=minf(100.0,float(market.services.get(service,0.0))+boost)
+	var ledger:Dictionary=market.ledger
+	_event("treasury","Городская казна: %d монет"%int(market.treasury),["За день: продажи %d · подать %d · жалованье %d · выкуп у жителей %d · содержание города %d · помощь бедным %d порц."%[int(ledger.get("sales",0)),int(ledger.get("levy",0)),int(ledger.get("wages",0)),int(ledger.get("buybacks",0)),int(ledger.get("upkeep",0)),int(ledger.get("relief",0))]],[])
+	market.ledger=_empty_ledger()
 
 
 func _process_calendar()->void:
@@ -1061,12 +1202,40 @@ func _process_calendar()->void:
 				_event("wedding","Свадьба в поселении",[],event.people)
 			"fair":
 				_event("fair","На городской площади открылась ярмарка",["Торговля, встречи и выступления."],[])
-				# A visiting caravan purchases exports and replenishes shortages, recording trade.
-				for item:String in Catalog.GOODS:
-					var target:int=int(Catalog.GOODS[item].stock); var stock:int=int(market.stocks.get(item,0))
-					var imported:int=maxi(0,target/3-stock)
-					if imported>0 and int(market.treasury)>=imported*int(Catalog.GOODS[item].price): market.stocks[item]=stock+imported; market.treasury=int(market.treasury)-imported*int(Catalog.GOODS[item].price)
+				_run_fair()
 				_schedule("fair",clock+10080,[],"life_market","Городская ярмарка")
+
+
+## A visiting caravan buys the town's surplus (export income for the treasury) and
+## refills shortages up to a third of the target (paid from the treasury at base price).
+func _run_fair()->void:
+	var purse:int=int(float(market.get("treasury_base",0))*CARAVAN_PURSE_SHARE)
+	var exported:=0; var export_income:=0; var imported:=0; var import_cost:=0
+	# Surplus offers first; if they exceed the caravan purse every item is cut by the same share.
+	var offers:Dictionary={}; var offered:=0.0
+	for item:String in Catalog.GOODS:
+		var target:int=_stock_target(item); var stock:int=int(market.stocks.get(item,0))
+		if target<=0 or stock<=roundi(target*EXPORT_ABOVE): continue
+		var unit:float=maxf(.5,float(Catalog.GOODS[item].price)*EXPORT_PRICE)
+		offers[item]={"amount":stock-roundi(target*EXPORT_KEEP),"unit":unit}; offered+=(stock-roundi(target*EXPORT_KEEP))*unit
+	var share:float=minf(1.0,float(purse)/maxf(1.0,offered))
+	for item:String in offers:
+		var amount:int=floori(int(offers[item].amount)*share)
+		if amount<=0: continue
+		var income:int=roundi(amount*float(offers[item].unit))
+		market.stocks[item]=int(market.stocks[item])-amount; exported+=amount; export_income+=income
+	market.treasury=int(market.treasury)+export_income
+	_ledger_add("exports",export_income)
+	for item:String in Catalog.GOODS:
+		var refill_target:int=int(Catalog.GOODS[item].stock); var stock:int=int(market.stocks.get(item,0))
+		var amount:int=maxi(0,refill_target/3-stock)
+		var unit:int=int(Catalog.GOODS[item].price)
+		if amount<=0 or unit<=0: continue
+		amount=mini(amount,int(market.treasury)/unit)
+		if amount<=0: continue
+		market.stocks[item]=stock+amount; market.treasury=int(market.treasury)-amount*unit; imported+=amount; import_cost+=amount*unit
+	_ledger_add("imports",import_cost)
+	_event("fair_trade","Караван на ярмарке",["Вывезено излишков %d шт. за %d монет · завезено %d шт. за %d монет."%[exported,export_income,imported,import_cost]],[])
 
 
 func _die(id:String)->void:
@@ -1199,11 +1368,11 @@ func _skill_name(id:String)->String:
 
 func snapshot()->Dictionary:
 	for id:String in _bindings: _sync_hero(id)
-	return {"version":1,"clock":clock,"day":_day,"residents":residents.duplicate(true),"households":households.duplicate(true),"market":market.duplicate(true),"businesses":businesses.duplicate(true),"weather":weather.duplicate(true),"settings":settings.duplicate(true),"events":events.duplicate(true),"calendar_events":calendar_events.duplicate(true),"next_person":_next_person,"next_event":_next_event,"rng_state":str(_rng.state),"requests":_requests.duplicate(true)}
+	return {"version":SNAPSHOT_VERSION,"clock":clock,"day":_day,"residents":residents.duplicate(true),"households":households.duplicate(true),"market":market.duplicate(true),"businesses":businesses.duplicate(true),"weather":weather.duplicate(true),"settings":settings.duplicate(true),"events":events.duplicate(true),"calendar_events":calendar_events.duplicate(true),"next_person":_next_person,"next_event":_next_event,"rng_state":str(_rng.state),"requests":_requests.duplicate(true)}
 
 
 func valid_snapshot(data:Dictionary)->bool:
-	if int(data.get("version",0))!=1 or not data.get("residents") is Dictionary or not data.get("households") is Dictionary or not data.get("market") is Dictionary: return false
+	if int(data.get("version",0)) not in [1,SNAPSHOT_VERSION] or not data.get("residents") is Dictionary or not data.get("households") is Dictionary or not data.get("market") is Dictionary: return false
 	if not _finite_tree(data): return false
 	for key:String in ["clock","day","next_person","next_event"]:
 		if not _numeric(data.get(key)) or float(data[key])<0: return false
@@ -1269,6 +1438,12 @@ func valid_snapshot(data:Dictionary)->bool:
 			if not _numeric(amount) or float(amount)<0: return false
 	for key:String in ["treasury","turnover"]:
 		if not _numeric(data.market[key]) or float(data.market[key])<0: return false
+	if data.market.has("flow"):
+		if not data.market.flow is Dictionary: return false
+		for amount in data.market.flow.values():
+			if not _numeric(amount): return false
+	if data.market.has("ledger") and not data.market.ledger is Dictionary: return false
+	if data.market.has("treasury_base") and (not _numeric(data.market.treasury_base) or float(data.market.treasury_base)<0): return false
 	for key:String in ["events","calendar_events"]:
 		if not data.get(key) is Array: return false
 		for event in data[key]:
@@ -1283,6 +1458,31 @@ func valid_snapshot(data:Dictionary)->bool:
 			if not _numeric(business.get(key)) or float(business[key])<0: return false
 		if not str(business.owner).is_empty() and not data.households.has(str(business.owner)): return false
 	return true
+
+
+## v1 → v2: finite treasury, live-price memory and daily ledger. Enterprise prices/markups
+## are kept (markup already lies in 0.75–1.5); only negative or missing values are repaired.
+func _migrate_market(_from_version:int)->void:
+	if not _numeric(market.get("treasury_base")) or int(market.get("treasury_base",0))<=0: market.treasury_base=_treasury_base()
+	market.treasury_base=int(market.treasury_base)
+	if int(market.treasury)>TREASURY_LEGACY_LIMIT:
+		# Legacy "infinite" treasury (v1 started at 1 000 000): keep what the town actually
+		# earned or lost since then, clamped, on top of the new finite base.
+		var delta:int=clampi(int(market.treasury)-1000000,-int(market.treasury_base),int(market.treasury_base)*2)
+		market.treasury=maxi(int(market.treasury_base)/4,int(market.treasury_base)+delta)
+	var flow:Dictionary={}
+	if market.get("flow") is Dictionary:
+		for item in market.flow:
+			if Catalog.GOODS.has(str(item)): flow[str(item)]=float(market.flow[item])
+	market.flow=flow
+	var ledger:Dictionary=_empty_ledger()
+	if market.get("ledger") is Dictionary:
+		for key:String in ledger: ledger[key]=int(market.ledger.get(key,0))
+	market.ledger=ledger
+	for business:Dictionary in businesses.values():
+		business.markup=clampf(float(business.get("markup",1.0)),.75,1.5)
+		business.price=maxi(1,int(business.get("price",360)))
+		business.profits=maxi(0,int(business.get("profits",0)))
 
 
 func _numeric(value:Variant)->bool:
@@ -1316,6 +1516,7 @@ func restore(data:Dictionary)->bool:
 	for key:String in ["stocks","production","consumed"]:
 		for item:String in market[key]: market[key][item]=int(market[key][item])
 	for key:String in ["treasury","turnover"]: market[key]=int(market[key])
+	_migrate_market(int(data.get("version",1)))
 	for p:Dictionary in residents.values():
 		for item:String in p.inventory: p.inventory[item]=int(p.inventory[item])
 	for h:Dictionary in households.values():
