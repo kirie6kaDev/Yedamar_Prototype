@@ -2,7 +2,7 @@ extends RefCounted
 ## Authoritative, scene-independent life simulation. Every resident has one persistent record.
 const Catalog = preload("res://scripts/life_catalog.gd")
 const Population = preload("res://scripts/life_population.gd")
-const SNAPSHOT_VERSION:=2
+const SNAPSHOT_VERSION:=3
 # Economy step 3: live prices, a fair that also exports surplus, finite treasury.
 const PRICE_MIN:=0.5 # buy multiplier floor relative to Catalog base price
 const PRICE_MAX:=2.5 # buy multiplier ceiling
@@ -17,10 +17,21 @@ const WAGE_FLOOR_SHARE:=0.25 # below 25 % of base treasury wages shrink linearly
 const WAGE_MIN_FACTOR:=0.3 # …but never under 30 % while the treasury can pay at all
 const LEVY_FREE:=200 # NPC households keep 200 coins untaxed
 const LEVY_RATE:=0.04 # daily hearth levy on savings above LEVY_FREE (NPC households only)
-const EXPORT_ABOVE:=2.0 # fair exports stock above 2× target…
-const EXPORT_KEEP:=1.5 # …down to 1.5× target
+const EXPORT_ABOVE:=1.5 # fair exports stock above 1.5× target… (step 4: was 2.0, production now stops at 2.0)
+const EXPORT_KEEP:=1.2 # …down to 1.2× target
 const EXPORT_PRICE:=0.5 # caravan pays half of base price for surplus
 const CARAVAN_PURSE_SHARE:=0.2 # caravan spends at most 20 % of base treasury per fair
+const GLUT_START:=1.2 # output shrinks once stock passes 1.2× target…
+const GLUT_STOP:=2.0 # …and stops at 2× target (the workshop switches recipe or does upkeep)
+const UPKEEP_WAGE:=0.5 # an hour of upkeep (nothing worth producing) pays half the wage
+const SHIFT_MINUTES:=240 # four worked hours in a day count as one shift
+const SHIFTS_PER_RANK:=6 # rank needs skill level AND 6 shifts per step (rank 10 ≈ 54 shifts)
+const RANK_WAGE_BONUS:=0.05 # +5 % pay per rank step (was +8 %: rank 10 paid +72 %)
+const STATION_CAPACITY:=3 # workers per profession station (two NPCs of one trade + the hero)
+const CONTRACT_MAX_OPEN:=6
+const CONTRACT_DAYS:=3
+const CONTRACT_PREMIUM:=1.3 # orders pay 30 % above the live market price
+const CONTRACT_ROLES:={"blacksmith":{"name":"Кузнец","skill":"blacksmithing","items":["iron_tool","iron_blank","iron_sword","iron_armor"]},"alchemist":{"name":"Алхимик и травник","skill":"alchemy","items":["healing_potion","stamina_potion","remedy","tonic","bandage"]},"hunter":{"name":"Охотник","skill":"tracking","items":["meat","hide","arrow","bow"]},"farmer":{"name":"Фермер","skill":"farming","items":["wheat","carrot","hay","apple","herb"]}}
 const UPKEEP_RATE:=0.03 # daily public upkeep: 3 % of treasury above its base
 const LUXURY_BUDGET:=250 # households with this much spare money also buy luxuries
 
@@ -48,6 +59,9 @@ var _next_person:int=49
 var _next_event:int=1
 var _day:int=1
 var _requests:Dictionary={}
+## Step 4 order board: id → {item, quantity, reward, escrow, poster, poster_name, role, status, …}.
+var contracts:Dictionary={}
+var _next_contract:int=1
 var _configured:bool=false
 
 
@@ -65,7 +79,9 @@ func configure(config:Dictionary)->void:
 		if station.has("approach"): station.position=station.approach.duplicate()
 		if not station.has("kind"): station.kind=str(station.get("prop","workplace"))
 		if not station.has("parent"): station.parent=Catalog.City.PROFESSION_VENUES.get(profession,"")
-		if not station.has("capacity"): station.capacity=1
+		# Step 4: JOBS holds farmer, baker and guard twice; with capacity 1 the second worker
+		# found the station "occupied" all shift (households 01 and 05 earned almost nothing).
+		if not station.has("capacity"): station.capacity=STATION_CAPACITY
 		venues[id]=station
 	if not venues.has("life_player_home"):
 		venues.life_player_home={"id":"life_player_home","kind":"home","name":"Хозяйство у фермы Марты","position":[3995.0,67.0,4426.0],"capacity":8,"safe":true,"price":0}
@@ -281,11 +297,21 @@ func command_spec(actor_id:String,action:String,payload:Dictionary={})->Dictiona
 		var profession:String=str(payload.get("profession_id",p.profession))
 		if profession!=p.profession or not professions.has(profession): result.reason="Сначала устройтесь на эту работу."; return result
 		if not _is_work_time(profession): result.reason="Сейчас нерабочее время этой профессии."; return result
-		for item:String in professions[profession].inputs:
-			if int(market.stocks.get(item,0))<int(professions[profession].inputs[item]): result.reason="Мастерской не хватает: "+str(Catalog.GOODS[item].name); return result
 		if float(p.needs.energy)<12 or float(p.needs.hunger)<10: result.reason="Сначала восстановите силы и поешьте."; return result
 	if action=="apply_job":
-		if not professions.has(str(payload.get("profession_id",""))) or not _adult(p): result.reason="Профессия доступна взрослому жителю."; return result
+		var wanted:String=str(payload.get("profession_id",""))
+		if not professions.has(wanted) or not _adult(p): result.reason="Профессия доступна взрослому жителю."; return result
+		var role:Dictionary=professions[wanted]
+		if float(p.age_years)<float(role.get("minimum_age",18)): result.reason="С этой профессии начинают с %d лет."%int(role.minimum_age); return result
+		if wanted==str(p.profession): result.reason="Вы уже работаете здесь."; return result
+		var needed:int=int(role.get("required_level",1))
+		if _skill_level_of(p,str(role.skill))<needed: result.reason="Нужен навык «%s» уровня %d (сейчас %d)."%[_skill_name(str(role.skill)),needed,_skill_level_of(p,str(role.skill))]; return result
+	if action in ["take_order","deliver_order"]:
+		var contract:Dictionary=contracts.get(str(payload.get("order_id","")),{})
+		if contract.is_empty() or str(contract.status) not in ["open","taken"]: result.reason="Заказ уже закрыт или не найден."; return result
+		if str(contract.status)=="taken" and str(contract.taker_household)!=str(p.household_id): result.reason="Этот заказ уже взяла другая семья."; return result
+		if action=="take_order" and str(contract.status)=="taken": result.reason="Заказ уже у вас."; return result
+		if action=="deliver_order" and int(inv.get(str(contract.item),0))<int(contract.quantity): result.reason="В рюкзаке нужно: %s ×%d."%[str(Catalog.GOODS[contract.item].name),int(contract.quantity)]; return result
 	if action in ["buy","sell"]:
 		var item:String=str(payload.get("item_id",""))
 		var amount:int=int(payload.get("quantity",1))
@@ -478,34 +504,42 @@ func _execute(id:String,action:String,payload:Dictionary)->Dictionary:
 			# unpaid volunteering (goods still reach the market). Wages shrink when the treasury is low.
 			var paid_minutes:int=int(p.get("paid_minutes_today",0))
 			var rate:float=1.0 if paid_minutes<480 else (.5 if paid_minutes<600 else 0.0)
+			# Step 4: the workshop picks the most valuable feasible recipe at live prices; with a full
+			# warehouse the hour goes to upkeep (service, reduced pay) instead of unsellable goods.
+			var plan:Dictionary=_production_plan(p.profession,multiplier)
+			var upkeep:bool=bool(plan.upkeep)
+			if upkeep: rate*=UPKEEP_WAGE
 			var wage:int=0
 			if rate>0:
-				wage=maxi(1,roundi(float(job.wage)/8.0*rate*multiplier*(1+.08*(int(p.career.level)-1))*_wage_factor()))
+				wage=maxi(1,roundi(float(job.wage)/8.0*rate*multiplier*(1+RANK_WAGE_BONUS*(int(p.career.level)-1))*_wage_factor()))
 			if wage>0 and int(market.treasury)<wage: return {"ok":false,"message":"Работодатель временно не может оплатить смену: городская казна пуста."}
-			p.paid_minutes_today=paid_minutes+60
-			for item:String in job.inputs: market.stocks[item]=int(market.stocks[item])-int(job.inputs[item])
-			for item:String in job.outputs:
-				var amount:int=maxi(1,roundi(int(job.outputs[item])*multiplier))
+			p.paid_minutes_today=paid_minutes+60; p["last_work_clock"]=clock
+			for item:String in plan.consumed: market.stocks[item]=int(market.stocks[item])-int(plan.consumed[item])
+			for item:String in plan.produced:
+				var amount:int=int(plan.produced[item])
 				market.stocks[item]=int(market.stocks.get(item,0))+amount; market.production[item]=int(market.production.get(item,0))+amount
 			if not str(job.service).is_empty(): market.services[job.service]=minf(100,float(market.services.get(job.service,0))+multiplier)
+			elif upkeep: market.services.community=minf(100,float(market.services.get("community",0))+multiplier*.5)
 			if wage>0:
 				market.treasury=int(market.treasury)-wage; home.coins=int(home.coins)+wage; home.income=int(home.income)+wage
 				_ledger_add("wages",wage)
 				p.lifetime_wages=int(p.lifetime_wages)+wage
-			_business_profit(p,job,wage,multiplier)
+			_business_profit(p,job,wage,plan.produced,plan.consumed)
 			p.career.work_minutes=float(p.career.work_minutes)+60; p.career.earned=int(p.career.earned)+wage
 			p.career.performance=float(p.career.performance)+5*multiplier
-			var level:int=mini(10,1+floori(float(p.career.work_minutes)/1200))
-			if level>int(p.career.level): p.career.level=level; _remember(id,"promotion","Повышение",[job.name+" · ступень "+str(level)]); _event("promotion",p.name+" получил повышение",[job.name], [id])
-			_skill(id,str(job.skill),10); _change_need(id,"energy",-4); _change_need(id,"hygiene",-4)
-			if wage>0 and rate<1.0: message="Сверхурочный час (×0,5). Семья получила %d монет."%wage
-			elif wage>0: message="Рабочий час завершён. Семья получила %d монет."%wage
+			# A shift counts once per day after four worked hours (J2: shifts used to stay at 0).
+			if paid_minutes+60==SHIFT_MINUTES: p.career.shifts=int(p.career.get("shifts",0))+1
+			_skill(id,str(job.skill),10*(.5 if upkeep else 1.0)); _change_need(id,"energy",-4); _change_need(id,"hygiene",-4)
+			_update_rank(id)
+			if upkeep and wage>0: message="Склад полон — час ушёл на обслуживание мастерской. Семья получила %d монет."%wage
+			elif wage>0 and rate<1.0: message="Сверхурочный час (×0,5). Семья получила %d монет."%wage
+			elif wage>0: message="Рабочий час завершён (%s). Семья получила %d монет."%[str(plan.name),wage]
 			else: message="Рабочий час завершён. Оплата за сегодня уже выдана (8 часов и 2 сверхурочных)."
-			extra={"wage":wage,"skill":job.skill}
+			extra={"wage":wage,"skill":job.skill,"recipe":str(plan.id),"produced":plan.produced.duplicate()}
 		"apply_job":
 			for business:Dictionary in businesses.values(): business.employees.erase(id)
-			p.profession=str(payload.profession_id); p.workplace_id=_workplace(p.profession); p.career={"level":1,"performance":0.0,"work_minutes":0.0,"earned":0,"shifts":0}
-			_remember(id,"job","Новая профессия",[professions[p.profession].name]); message="Вы устроились на работу: "+str(professions[p.profession].name)+"."
+			_switch_career(p,str(payload.profession_id))
+			_remember(id,"job","Новая профессия",[professions[p.profession].name]); message="Вы устроились на работу: %s (ступень %d)."%[str(professions[p.profession].name),int(p.career.level)]
 		"quit_job":
 			for business:Dictionary in businesses.values(): business.employees.erase(id)
 			p.profession=""; p.workplace_id=""; message="Персонаж оставил работу."
@@ -555,10 +589,15 @@ func _execute(id:String,action:String,payload:Dictionary)->Dictionary:
 			var worker_id:String=str(payload.worker_id); var profession:String=str(payload.profession_id)
 			for business:Dictionary in businesses.values(): business.employees.erase(worker_id)
 			businesses[str(payload.business_id)].employees.append(worker_id)
-			var worker:Dictionary=residents[worker_id]; worker.profession=profession; worker.workplace_id=_workplace(profession); worker.current_action={}; release(worker_id)
-			worker.career={"level":1,"performance":0.0,"work_minutes":0.0,"earned":0,"shifts":0}
-			_remember(worker_id,"job","Работа в семейном предприятии",[p.id]); message="Работник нанят и будет приходить по расписанию."
+			var worker:Dictionary=residents[worker_id]; _switch_career(worker,profession); worker.current_action={}; release(worker_id)
+			_remember(worker_id,"job","Работа в семейном предприятии",[p.id]); message="%s нанят на должность «%s» и будет приходить по расписанию."%[str(worker.name),str(professions[profession].name)]
 		"set_price": businesses[str(payload.business_id)].markup=float(payload.get("markup",1.0)); message="Наценка предприятия изменена."
+		"take_order":
+			var contract:Dictionary=contracts[str(payload.order_id)]
+			contract.status="taken"; contract.taker=id; contract.taker_household=str(p.household_id)
+			message="Заказ принят: %s ×%d до дня %d, награда %d монет."%[str(Catalog.GOODS[contract.item].name),int(contract.quantity),int(contract.deadline_day),int(contract.reward)]
+		"deliver_order":
+			message=_deliver_contract(id,str(payload.order_id))
 	_refresh_mood(id)
 	release(id)
 	var result:Dictionary={"ok":true,"message":message,"action":action,"actor_id":id}
@@ -567,14 +606,14 @@ func _execute(id:String,action:String,payload:Dictionary)->Dictionary:
 	return result
 
 
-func _business_profit(p:Dictionary,job:Dictionary,wage:int,multiplier:float)->void:
+func _business_profit(p:Dictionary,job:Dictionary,wage:int,produced:Dictionary,consumed:Dictionary)->void:
 	var business:Dictionary=businesses.get(str(job.venue_id),{})
 	if business.is_empty() or str(business.owner).is_empty() or not households.has(str(business.owner)): return
 	if not business.employees.has(p.id): business.employees.append(p.id)
 	var revenue:int=0; var inputs:int=0
 	# Enterprise revenue follows live market prices, so markup and scarcity both matter.
-	for item:String in job.outputs: revenue+=maxi(1,roundi(int(job.outputs[item])*multiplier))*price(item)
-	for item:String in job.inputs: inputs+=int(job.inputs[item])*price(item)
+	for item:String in produced: revenue+=int(produced[item])*price(item)
+	for item:String in consumed: inputs+=int(consumed[item])*price(item)
 	if not str(job.service).is_empty(): revenue=wage+3
 	# High asking prices reduce sales volume; stock remains in the shared local market.
 	var margin:float=float(business.markup)
@@ -583,6 +622,80 @@ func _business_profit(p:Dictionary,job:Dictionary,wage:int,multiplier:float)->vo
 	var profit:int=mini(maxi(0,int(market.treasury)-cushion),maxi(0,roundi(revenue*margin*demand)-inputs-wage))
 	var owner:Dictionary=households[business.owner]
 	market.treasury=int(market.treasury)-profit; owner.coins=int(owner.coins)+profit; owner.income=int(owner.income)+profit; business.profits=int(business.profits)+profit
+
+
+func _skill_level_of(p:Dictionary,skill:String)->int:
+	var value:Variant=p.skills.get(skill,0.0)
+	if value is Dictionary: value=float(value.get("xp",0))
+	return Catalog.skill_level(float(value))
+
+
+## J3: careers are remembered per profession, so returning to an old trade restores its rank.
+func _switch_career(p:Dictionary,profession:String)->void:
+	if not p.has("career_history") or not p.career_history is Dictionary: p["career_history"]={}
+	if not str(p.profession).is_empty() and professions.has(str(p.profession)): p.career_history[str(p.profession)]=p.career.duplicate(true)
+	p.profession=profession; p.workplace_id=_workplace(profession)
+	var previous:Variant=p.career_history.get(profession,{})
+	p.career=previous.duplicate(true) if previous is Dictionary and not previous.is_empty() else {"level":1,"performance":0.0,"work_minutes":0.0,"earned":0,"shifts":0}
+	if not p.career.has("shifts"): p.career.shifts=0
+
+
+## J2: rank = min(skill level in the role's skill, 1 + shifts/6); never drops.
+func _update_rank(id:String)->void:
+	var p:Dictionary=residents[id]
+	if not professions.has(str(p.profession)): return
+	var job:Dictionary=professions[p.profession]
+	var by_skill:int=_skill_level_of(p,str(job.skill))
+	var by_shifts:int=1+floori(float(p.career.get("shifts",0))/SHIFTS_PER_RANK)
+	var level:int=clampi(mini(by_skill,by_shifts),1,10)
+	if level>int(p.career.level):
+		p.career.level=level
+		_remember(id,"promotion","Повышение",[str(job.name)+" · ступень "+str(level)]); _event("promotion",str(p.name)+" получил повышение",[str(job.name)],[id])
+
+
+## Output share for one good: full up to 1.2× target, linearly down to 0 at 2× target.
+func _glut_factor(item:String)->float:
+	var target:int=_stock_target(item)
+	if target<=0: return 1.0
+	var ratio:float=float(market.stocks.get(item,0))/float(target)
+	return clampf((GLUT_STOP-ratio)/(GLUT_STOP-GLUT_START),0.0,1.0)
+
+
+## Chooses the recipe for one work hour: value = Σ outputs × live price × glut share
+## (+25 % for goods with an open order) − Σ inputs × live price. Nothing worth making → upkeep.
+func _production_plan(profession:String,multiplier:float)->Dictionary:
+	var job:Dictionary=professions[profession]
+	var plan:Dictionary={"id":"upkeep","name":"Обслуживание мастерской","upkeep":false,"produced":{},"consumed":{}}
+	var recipes:Array=job.get("recipes",[{"id":"main","name":"Основная работа","inputs":job.inputs,"outputs":job.outputs}])
+	var has_goods:bool=false
+	for recipe:Dictionary in recipes:
+		if not recipe.outputs.is_empty(): has_goods=true
+	if not has_goods:
+		plan.id="service"; plan.name=str(job.name); return plan
+	var best:float=0.0
+	for recipe:Dictionary in recipes:
+		if recipe.outputs.is_empty(): continue
+		var feasible:=true
+		for item:String in recipe.inputs:
+			if int(market.stocks.get(item,0))<int(recipe.inputs[item]): feasible=false
+		if not feasible: continue
+		var produced:Dictionary={}; var value:=0.0; var share_max:=0.0
+		for item:String in recipe.outputs:
+			var share:float=_glut_factor(item)
+			if share<=0.0: continue
+			var amount:int=maxi(1,roundi(int(recipe.outputs[item])*multiplier*share))
+			produced[item]=amount; share_max=maxf(share_max,share)
+			value+=amount*price(item)*(1.25 if _open_contract_for(item) else 1.0)
+		if produced.is_empty(): continue
+		var consumed:Dictionary={}
+		for item:String in recipe.inputs:
+			consumed[item]=maxi(1,ceili(int(recipe.inputs[item])*share_max))
+			value-=int(consumed[item])*price(item)
+		if value>best:
+			best=value
+			plan={"id":str(recipe.id),"name":str(recipe.name),"upkeep":false,"produced":produced,"consumed":consumed}
+	if best<=0.0: plan.upkeep=true
+	return plan
 
 
 func _cook_recipe(inv:Dictionary)->Dictionary:
@@ -630,7 +743,7 @@ func _ledger_add(key:String,amount:int)->void:
 
 
 func _empty_ledger()->Dictionary:
-	return {"wages":0,"sales":0,"buybacks":0,"levy":0,"exports":0,"imports":0,"upkeep":0,"relief":0}
+	return {"wages":0,"sales":0,"buybacks":0,"levy":0,"exports":0,"imports":0,"upkeep":0,"relief":0,"contracts_paid":0,"contracts_market":0}
 
 
 ## Starting/finite treasury: two weeks of the full payroll of everyone employed.
@@ -994,8 +1107,15 @@ func suggest_action(id:String)->Dictionary:
 		if amount<20: score+=100
 		candidates.append({"action":need_actions[need],"payload":{},"score":score})
 	var hour:float=fmod(clock,1440)/60
-	if hour>=22 or hour<6: candidates.append({"action":"sleep","payload":{},"score":90 if float(p.needs.energy)<75 else 0})
-	if _is_work_time(str(p.profession)): candidates.append({"action":"work","payload":{"profession_id":p.profession},"score":58})
+	# Step 4 (households 01/05 earned almost nothing): the night-sleep bonus (90) always beat work (58),
+	# so night guards and 05:00 bakers slept through paid hours, and every 60-minute work action
+	# ended in a long walk home for a snack. Workers now rest outside their shift and stay on shift.
+	var on_shift:bool=_is_work_time(str(p.profession))
+	if (hour>=22 or hour<6) and not on_shift: candidates.append({"action":"sleep","payload":{},"score":90 if float(p.needs.energy)<75 else 0})
+	elif _rest_window(str(p.profession),hour) and not on_shift: candidates.append({"action":"sleep","payload":{},"score":90 if float(p.needs.energy)<75 else 0})
+	if on_shift:
+		var staying:bool=clock-float(p.get("last_work_clock",-9999.0))<=90.0 and int(p.get("paid_minutes_today",0))<480
+		candidates.append({"action":"work","payload":{"profession_id":p.profession},"score":88 if staying else 62})
 	if float(p.age_years)>=5 and float(p.age_years)<18 and hour>=9 and hour<13 and (_day-1)%7<5: candidates.append({"action":"study","payload":{},"score":76})
 	var target:String=_social_partner(id)
 	if not target.is_empty():
@@ -1016,6 +1136,15 @@ func suggest_action(id:String)->Dictionary:
 			if claims.size()>=capacity: continue
 			return {"action":choice.action,"payload":choice.payload}
 	return {}
+
+
+## Night-shift workers (start > end) sleep in the morning after their shift instead.
+func _rest_window(profession:String,hour:float)->bool:
+	if not professions.has(profession): return false
+	var job:Dictionary=professions[profession]
+	if int(job.start)<int(job.end): return false
+	var from:float=float(int(job.end)+1); var to:float=from+8.0
+	return hour>=from and hour<to
 
 
 func _social_partner(id:String)->String:
@@ -1139,6 +1268,7 @@ func _new_day()->void:
 					_schedule("birth",due,[id,partner],home.home_id,"Пополнение семьи"); break
 	_daily_household_demand()
 	_daily_market_upkeep()
+	_update_contracts()
 
 
 ## Prices drift back to base as remembered volume fades; NPC savings pay a hearth levy.
@@ -1204,6 +1334,99 @@ func _process_calendar()->void:
 				_event("fair","На городской площади открылась ярмарка",["Торговля, встречи и выступления."],[])
 				_run_fair()
 				_schedule("fair",clock+10080,[],"life_market","Городская ярмарка")
+
+
+func _open_contract_for(item:String)->bool:
+	for contract:Dictionary in contracts.values():
+		if str(contract.item)==item and str(contract.status) in ["open","taken"]: return true
+	return false
+
+
+## Open and taken orders, newest first (API for UI, bridge or multiplayer).
+func open_contracts()->Array:
+	var rows:Array=[]
+	for contract:Dictionary in contracts.values():
+		if str(contract.status) in ["open","taken"]: rows.append(contract.duplicate(true))
+	rows.sort_custom(func(a,b): return int(a.created_day)>int(b.created_day))
+	return rows
+
+
+func _refund_contract(contract:Dictionary)->void:
+	var escrow:int=int(contract.escrow)
+	if escrow<=0: return
+	if households.has(str(contract.poster)): households[contract.poster].coins=int(households[contract.poster].coins)+escrow
+	else: market.treasury=int(market.treasury)+escrow
+	contract.escrow=0
+
+
+## Daily: expire overdue orders, let the town fill untaken ones from recovered stock, post new
+## orders for shortages of the four flagship roles. Rewards are held in escrow when posted.
+func _update_contracts()->void:
+	var open_count:=0
+	for cid:String in contracts.keys():
+		var contract:Dictionary=contracts[cid]
+		if str(contract.status) not in ["open","taken"]: continue
+		var item:String=str(contract.item); var qty:int=int(contract.quantity)
+		if _day>int(contract.deadline_day):
+			_refund_contract(contract); contract.status="expired"; contract.closed_day=_day; continue
+		if str(contract.status)=="open" and int(market.stocks.get(item,0))>=qty+roundi(_stock_target(item)*.5):
+			# Local workshops caught up: the poster buys from the market, escrow pays the market.
+			market.stocks[item]=int(market.stocks[item])-qty; market.consumed[item]=int(market.consumed.get(item,0))+qty
+			market.treasury=int(market.treasury)+int(contract.escrow); _ledger_add("contracts_market",int(contract.escrow))
+			if households.has(str(contract.poster)): households[contract.poster].expenses=int(households[contract.poster].expenses)+int(contract.escrow)
+			contract.escrow=0; contract.status="filled_market"; contract.closed_day=_day; continue
+		open_count+=1
+	var closed:Array=[]
+	for cid:String in contracts:
+		if str(contracts[cid].status) not in ["open","taken"]: closed.append(cid)
+	closed.sort_custom(func(a,b): return int(contracts[a].get("closed_day",0))<int(contracts[b].get("closed_day",0)))
+	while closed.size()>20: contracts.erase(closed.pop_front())
+	var candidates:Array=[]
+	for role:String in CONTRACT_ROLES:
+		for item:String in CONTRACT_ROLES[role].items:
+			var target:int=_stock_target(item)
+			if target>0 and int(market.stocks.get(item,0))<roundi(target*.5) and not _open_contract_for(item): candidates.append([role,item])
+	var posted:=0
+	while posted<2 and open_count<CONTRACT_MAX_OPEN and not candidates.is_empty():
+		var pick:Array=candidates.pop_at(_rng.randi_range(0,candidates.size()-1))
+		var role:String=pick[0]; var item:String=pick[1]
+		var qty:int=clampi(roundi(_stock_target(item)*.5)-int(market.stocks.get(item,0)),1,10)
+		var reward:int=maxi(qty,roundi(qty*price(item)*CONTRACT_PREMIUM))
+		var poster:String=""; var poster_name:String="Городской совет"
+		var houses:Array=households.keys(); var offset:int=_rng.randi_range(0,houses.size()-1)
+		for index in houses.size():
+			var hid:String=str(houses[(index+offset)%houses.size()])
+			if str(hid)=="house_player": continue
+			var home:Dictionary=households[hid]
+			if _shop_budget(home,_living_members(home))>=reward: poster=str(hid); poster_name=str(home.name); break
+		if poster.is_empty():
+			if int(market.treasury)-reward<int(float(market.get("treasury_base",0))*WAGE_FLOOR_SHARE): continue
+			market.treasury=int(market.treasury)-reward; poster="town"
+		else:
+			households[poster].coins=int(households[poster].coins)-reward
+		var cid:String="order_%04d"%_next_contract; _next_contract+=1
+		contracts[cid]={"id":cid,"role":role,"role_name":str(CONTRACT_ROLES[role].name),"item":item,"quantity":qty,"reward":reward,"escrow":reward,"poster":poster,"poster_name":poster_name,"status":"open","taker":"","taker_household":"","created_day":_day,"deadline_day":_day+CONTRACT_DAYS,"closed_day":0}
+		posted+=1; open_count+=1
+		_event("order","Новый заказ: %s ×%d"%[str(Catalog.GOODS[item].name),qty],["%s · награда %d монет · до дня %d · роль: %s."%[poster_name,reward,_day+CONTRACT_DAYS,str(CONTRACT_ROLES[role].name)]],[])
+
+
+func _deliver_contract(id:String,cid:String)->String:
+	var p:Dictionary=residents[id]; var contract:Dictionary=contracts[cid]
+	var item:String=str(contract.item); var qty:int=int(contract.quantity); var reward:int=int(contract.escrow)
+	p.inventory[item]=int(p.inventory[item])-qty
+	if households.has(str(contract.poster)):
+		var poster:Dictionary=households[contract.poster]
+		poster.inventory[item]=int(poster.inventory.get(item,0))+qty; poster.expenses=int(poster.expenses)+reward
+	else:
+		market.stocks[item]=int(market.stocks.get(item,0))+qty
+	var home:Dictionary=households[p.household_id]
+	home.coins=int(home.coins)+reward; home.income=int(home.income)+reward
+	contract.escrow=0; contract.status="done"; contract.taker=id; contract.taker_household=str(p.household_id); contract.closed_day=_day
+	_ledger_add("contracts_paid",reward)
+	_skill(id,str(CONTRACT_ROLES.get(str(contract.role),{}).get("skill","trade")),mini(60,15*qty)); _skill(id,"trade",5)
+	_remember(id,"order","Выполнен заказ",[str(Catalog.GOODS[item].name)+" ×"+str(qty)])
+	_event("order","Заказ выполнен: %s ×%d"%[str(Catalog.GOODS[item].name),qty],[str(p.name)+" получил %d монет."%reward],[id])
+	return "Заказ сдан: %s ×%d. Семья получила %d монет."%[str(Catalog.GOODS[item].name),qty,reward]
 
 
 ## A visiting caravan buys the town's surplus (export income for the treasury) and
@@ -1316,9 +1539,19 @@ func ui_state(selected_id:String,issuer:String="local")->Dictionary:
 		if not job.outputs.is_empty(): details.append("Производство: "+_goods_text(job.outputs))
 		if not job.inputs.is_empty(): details.append("Расход мастерской: "+_goods_text(job.inputs))
 		if not str(job.service).is_empty(): details.append("Услуги поселению: "+str({"community":"хозяйство","education":"обучение","safety":"безопасность","culture":"культура"}.get(job.service,job.service)))
+		if job.get("recipes",[]).size()>1:
+			var names:Array=[]
+			for recipe:Dictionary in job.recipes.slice(1): names.append(str(recipe.name))
+			details.append("Другие работы по спросу: "+", ".join(names))
+		if int(job.get("required_level",1))>1: details.append("Требуется: %s, уровень %d (ваш %d) · с %d лет" % [_skill_name(job.skill),int(job.required_level),_skill_level_of(p,str(job.skill)),int(job.minimum_age)])
 		var actions:Array=[_ui_action(selected_id,"apply_job","Устроиться",{"profession_id":id},issuer),_ui_action(selected_id,"work","Работать час",{"profession_id":id},issuer)]
-		if p.profession==id: details.append("Ваша профессия · уровень %d · отработано %.1f ч" % [p.career.level,float(p.career.work_minutes)/60]); actions.append(_ui_action(selected_id,"quit_job","Уволиться",{},issuer))
+		if p.profession==id: details.append("Ваша профессия · ступень %d · смен %d · отработано %.1f ч" % [p.career.level,int(p.career.get("shifts",0)),float(p.career.work_minutes)/60]); actions.append(_ui_action(selected_id,"quit_job","Уволиться",{},issuer))
 		result.careers.append(_row(id,job.name,details,actions))
+	# Order board rows sit at the top of the market tab (generic rows; no HUD change needed).
+	for contract:Dictionary in open_contracts():
+		var good:String=str(Catalog.GOODS[contract.item].name)
+		var status:String="взят вами" if str(contract.status)=="taken" else "открыт"
+		result.market.append(_row(str(contract.id),"Заказ · %s ×%d" % [good,int(contract.quantity)],["%s · %s · роль: %s" % [str(contract.poster_name),status,str(contract.role_name)],"Награда %d монет · срок до дня %d · в рюкзаке %d" % [int(contract.reward),int(contract.deadline_day),int(p.inventory.get(contract.item,0))]],[_ui_action(selected_id,"take_order","Взять заказ",{"order_id":contract.id},issuer),_ui_action(selected_id,"deliver_order","Сдать заказ",{"order_id":contract.id},issuer)]))
 	for item:String in Catalog.GOODS:
 		var stock:int=int(market.stocks.get(item,0)); var held:int=int(p.inventory.get(item,0))
 		result.market.append(_row(item,Catalog.GOODS[item].name,["На рынке %d · в рюкзаке %d" % [stock,held],"Покупка %d · продажа %d монет" % [price(item),price(item,true)]],[_ui_action(selected_id,"buy","Купить 1",{"item_id":item,"quantity":1},issuer),_ui_action(selected_id,"sell","Продать 1",{"item_id":item,"quantity":1},issuer)]))
@@ -1368,11 +1601,11 @@ func _skill_name(id:String)->String:
 
 func snapshot()->Dictionary:
 	for id:String in _bindings: _sync_hero(id)
-	return {"version":SNAPSHOT_VERSION,"clock":clock,"day":_day,"residents":residents.duplicate(true),"households":households.duplicate(true),"market":market.duplicate(true),"businesses":businesses.duplicate(true),"weather":weather.duplicate(true),"settings":settings.duplicate(true),"events":events.duplicate(true),"calendar_events":calendar_events.duplicate(true),"next_person":_next_person,"next_event":_next_event,"rng_state":str(_rng.state),"requests":_requests.duplicate(true)}
+	return {"version":SNAPSHOT_VERSION,"clock":clock,"day":_day,"residents":residents.duplicate(true),"households":households.duplicate(true),"market":market.duplicate(true),"businesses":businesses.duplicate(true),"weather":weather.duplicate(true),"settings":settings.duplicate(true),"events":events.duplicate(true),"calendar_events":calendar_events.duplicate(true),"next_person":_next_person,"next_event":_next_event,"rng_state":str(_rng.state),"requests":_requests.duplicate(true),"contracts":contracts.duplicate(true),"next_contract":_next_contract}
 
 
 func valid_snapshot(data:Dictionary)->bool:
-	if int(data.get("version",0)) not in [1,SNAPSHOT_VERSION] or not data.get("residents") is Dictionary or not data.get("households") is Dictionary or not data.get("market") is Dictionary: return false
+	if int(data.get("version",0)) not in [1,2,SNAPSHOT_VERSION] or not data.get("residents") is Dictionary or not data.get("households") is Dictionary or not data.get("market") is Dictionary: return false
 	if not _finite_tree(data): return false
 	for key:String in ["clock","day","next_person","next_event"]:
 		if not _numeric(data.get(key)) or float(data[key])<0: return false
@@ -1443,6 +1676,12 @@ func valid_snapshot(data:Dictionary)->bool:
 		for amount in data.market.flow.values():
 			if not _numeric(amount): return false
 	if data.market.has("ledger") and not data.market.ledger is Dictionary: return false
+	if not data.get("contracts",{}) is Dictionary or not _numeric(data.get("next_contract",1)): return false
+	for contract in data.get("contracts",{}).values():
+		if not contract is Dictionary or not Catalog.GOODS.has(str(contract.get("item",""))) or not CONTRACT_ROLES.has(str(contract.get("role",""))): return false
+		for key:String in ["quantity","reward","escrow","created_day","deadline_day"]:
+			if not _numeric(contract.get(key)) or float(contract[key])<0: return false
+		if str(contract.get("status","")) not in ["open","taken","done","expired","filled_market"]: return false
 	if data.market.has("treasury_base") and (not _numeric(data.market.treasury_base) or float(data.market.treasury_base)<0): return false
 	for key:String in ["events","calendar_events"]:
 		if not data.get(key) is Array: return false
@@ -1517,6 +1756,14 @@ func restore(data:Dictionary)->bool:
 		for item:String in market[key]: market[key][item]=int(market[key][item])
 	for key:String in ["treasury","turnover"]: market[key]=int(market[key])
 	_migrate_market(int(data.get("version",1)))
+	# v2 → v3: order board (absent in older saves) and per-profession career history.
+	contracts=data.get("contracts",{}).duplicate(true); _next_contract=maxi(1,int(data.get("next_contract",1)))
+	for contract:Dictionary in contracts.values():
+		for key:String in ["quantity","reward","escrow","created_day","deadline_day","closed_day"]: contract[key]=int(contract.get(key,0))
+	for p:Dictionary in residents.values():
+		if not p.career.has("shifts"): p.career.shifts=0
+		p.career.shifts=int(p.career.shifts); p.career.level=int(p.career.level)
+		if not p.get("career_history") is Dictionary: p["career_history"]={}
 	for p:Dictionary in residents.values():
 		for item:String in p.inventory: p.inventory[item]=int(p.inventory[item])
 	for h:Dictionary in households.values():

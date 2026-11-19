@@ -85,7 +85,24 @@ const ACTIONS := {
 	"buy_home":{"name":"Купить дом","duration":0.0,"animation":"","portable":true},"move_home":{"name":"Назначить семейным домом","duration":0.0,"animation":"","portable":true},
 	"invite_household":{"name":"Пригласить в хозяйство","duration":20.0,"animation":"interact"},"create_member":{"name":"Создать взрослого члена семьи","duration":0.0,"animation":"","portable":true},
 	"buy_workshop":{"name":"Купить мастерскую","duration":15.0,"animation":"interact"},"hire_worker":{"name":"Нанять работника","duration":20.0,"animation":"interact"},"set_price":{"name":"Назначить наценку","duration":0.0,"animation":"","portable":true},
-	"edit_profile":{"name":"Изменить персонажа","duration":0.0,"animation":"","portable":true},"set_autonomy":{"name":"Самостоятельная жизнь","duration":0.0,"animation":"","portable":true}
+	"edit_profile":{"name":"Изменить персонажа","duration":0.0,"animation":"","portable":true},"set_autonomy":{"name":"Самостоятельная жизнь","duration":0.0,"animation":"","portable":true},
+	"take_order":{"name":"Взять заказ","duration":0.0,"animation":"","portable":true},"deliver_order":{"name":"Сдать заказ","duration":0.0,"animation":"","portable":true}
+}
+# Economy step 4: alternative recipes. A workshop picks the most valuable feasible recipe at live
+# prices and skips goods whose stock is already ≥2× target. Main recipe = "inputs"/"outputs" above.
+const ALTERNATE_RECIPES := {
+	"farmer":[{"id":"hay","name":"Сено","inputs":{},"outputs":{"hay":6}},{"id":"carrot","name":"Морковь","inputs":{},"outputs":{"carrot":4}}],
+	"gardener":[{"id":"berry","name":"Ягоды","inputs":{},"outputs":{"berry":4}},{"id":"aromatic","name":"Мята и лаванда","inputs":{},"outputs":{"mint":2,"lavender":2}}],
+	"herbalist":[{"id":"aromatic","name":"Мята и лаванда","inputs":{},"outputs":{"mint":2,"lavender":2}}],
+	"lumberjack":[{"id":"branch","name":"Ветки и хворост","inputs":{},"outputs":{"branch":8,"wood":2}}],
+	"blacksmith":[{"id":"tool","name":"Инструменты","inputs":{"iron_ingot":1,"coal":1},"outputs":{"iron_tool":1}},{"id":"blank","name":"Кованые заготовки","inputs":{"iron_ingot":1,"coal":1},"outputs":{"iron_blank":1}},{"id":"sword","name":"Железный меч","inputs":{"iron_blank":2,"plank":1,"coal":1},"outputs":{"iron_sword":1}},{"id":"armor","name":"Железный доспех","inputs":{"iron_blank":3,"coal":2},"outputs":{"iron_armor":1}}],
+	"carpenter":[{"id":"bow","name":"Охотничий лук","inputs":{"plank":2,"branch":2},"outputs":{"bow":1}},{"id":"pickaxe","name":"Каменная кирка","inputs":{"stone":3,"branch":2},"outputs":{"pickaxe":1}}],
+	"hunter":[{"id":"arrows","name":"Стрелы","inputs":{"branch":2,"stone":1},"outputs":{"arrow":6}}],
+	"healer":[{"id":"bandage","name":"Повязки","inputs":{"herb":2},"outputs":{"bandage":2}}],
+	"magical_healer":[{"id":"healing_potion","name":"Лечебное зелье","inputs":{"herb":2,"mint":1,"water":1},"outputs":{"healing_potion":1}}],
+	"alchemist":[{"id":"healing_potion","name":"Лечебное зелье","inputs":{"herb":2,"mint":1,"water":1},"outputs":{"healing_potion":1}},{"id":"stamina_potion","name":"Зелье бодрости","inputs":{"lavender":2,"berry":1,"water":1},"outputs":{"stamina_potion":1}}],
+	"cook":[{"id":"ration","name":"Дорожная еда","inputs":{"fish":1,"wood":1},"outputs":{"ration":3}},{"id":"meat_stew","name":"Мясная похлёбка","inputs":{"meat":1,"carrot":1},"outputs":{"meal":4}}],
+	"miller":[{"id":"feed","name":"Отруби на корм","inputs":{"wheat":2},"outputs":{"hay":3}}]
 }
 const SOCIAL := ["socialize","joke","compliment","insult","apologize","flirt","propose","plan_child","educate","invite_household"]
 const WEATHER_NAMES := {"clear":"Ясно","cloudy":"Облачно","rain":"Дождь","storm":"Гроза","fog":"Туман","snow":"Снег"}
@@ -171,7 +188,12 @@ static func professions() -> Dictionary:
 			"outputs":def.outputs.duplicate(),
 			"service":str(def.service),
 			"minimum_age":int(def.get("minimum_age",18)),
+			# Skill gate for apply_job: better-paid roles need prior experience in the role's skill.
+			"required_level":1 if int(def.wage)<30 else (2 if int(def.wage)<35 else 3),
 		}
+		var recipes:Array=[{"id":"main","name":"Основная работа","inputs":def.inputs.duplicate(),"outputs":def.outputs.duplicate()}]
+		for alt:Dictionary in ALTERNATE_RECIPES.get(id,[]): recipes.append(alt.duplicate(true))
+		result[id]["recipes"]=recipes
 	return result
 
 static func stage(age:float)->String:
